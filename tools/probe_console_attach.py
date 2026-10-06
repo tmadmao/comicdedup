@@ -13,16 +13,16 @@ import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-src = ROOT / "dist" / "ComicDedupTool-dir"
+src = ROOT / "dist" / "ComicDedupTool"
 if not src.exists():
-    print(f"找不到 {src}，先执行 onedir 打包")
+    print(f"找不到 {src}，先执行 onedir 打包（双击 打包exe.bat）")
     sys.exit(2)
 
 dst = Path(os.environ["LOCALAPPDATA"]) / "Temp" / f"ctltest_{int(time.time())}"
 if dst.exists():
     shutil.rmtree(dst, ignore_errors=True)
 shutil.copytree(src, dst)
-exe = dst / "ComicDedupTool-dir.exe"
+exe = dst / "ComicDedupTool.exe"
 env = {**os.environ, "QT_QPA_PLATFORM": "offscreen"}
 
 print(f"被测 exe：{exe.name}（GUI 子系统）\n")
@@ -49,3 +49,6 @@ elif ok1 and ok2:
     print("结论：两种方式都能拿到输出。")
 else:
     print("结论：都拿不到输出，需要单独的命令行版。")
+
+# 用完就删 —— 这个副本解开有 260MB，别留在 %TEMP% 里
+shutil.rmtree(dst, ignore_errors=True)
