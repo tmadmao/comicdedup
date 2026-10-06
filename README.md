@@ -17,6 +17,54 @@ Windows 本地漫画查重桌面程序。**纯本地离线运行**，专门解�
 
 ---
 
+## 致谢
+
+本项目 v1.1 的比对算法重构不是拍脑袋改的：遇到的每一类问题，在文献和开源实现里都有名字、有人踩过。
+在此对这轮调研中读到的论文与项目一并致谢。
+
+**学术论文**
+
+- **On the burstiness of visual elements** —— Hervé Jégou, Matthijs Douze, Cordelia Schmid，CVPR 2009。
+  <http://vigir.missouri.edu/~gdesouza/Research/Conference_CDs/IEEE_CVPR_2009/data/papers/1530.pdf>
+  本轮最核心的一篇。它定义了「同一个视觉元素反复出现导致的相似度放大」，并给出三种对策，
+  其中的 MMR（一对一匹配）正是我们「一对一匹配页数」判据的理论出处；
+  我们实测的「共享版权页导致候选爆炸」就是 burstiness 的教科书案例。
+- **To Aggregate or Not to Aggregate: Selective Match Kernels for Image Search** ——
+  Giorgos Tolias, Yannis Avrithis, Hervé Jégou，ICCV 2013 / IJCV 2015。
+  <http://image.ntua.gr/iva/files/Tolias_ijcv15_iasmk.pdf>
+  两级阈值结构（`τ_l` 描述子级 + `τ_g` 图像级）来自这里，直接启发了本轮的
+  「命中数 + 成链数」双门槛与链长地板（`--chain-floor`）。
+- **Sketch-based Manga Retrieval using Manga109 Dataset** —— Yusuke Matsui 等，
+  Multimedia Tools and Applications 76(20), 2017。<https://arxiv.org/abs/1510.04389>
+  明确指出漫画是黑白线稿、缺少渐变，SIFT 一类为自然图像设计的描述子会失效，
+  正确做法是「去网点 + 边缘方向直方图（EOH）」。这是后续对付
+  「自制扫描版 vs 官方 DL 版」的思路来源（本轮未落地）。
+- **Separation of Manga Line Drawings and Screentones** ——
+  Ito, Matsui, Yamasaki, Aizawa，Eurographics 2015 Short Papers。
+  <https://www.researchgate.net/publication/277653033>
+  上一条的去网点具体算法：LoG + flow-based DoG 双 mask 按连通分量合并，无需人工调参。
+- **Efficient Cropping-Resistant Robust Image Hashing** ——
+  Martin Steinebach, Huajian Liu, York Yannikos，ARES 2014。<https://doi.org/10.1109/ARES.2014.85>
+  提供了「不要猜黑边在哪，而是分段各算一个哈希」的思路，对照出我们现行裁边策略的局限。
+- **Results and findings of the 2021 Image Similarity Challenge** —— Papakipos 等，NeurIPS 2021。
+  <https://lacuna.tiptreesystems.com/paper/results-and-findings-of-the-2021-image-similarity-challenge/art_59c6a437064c4d06ab84282c17f95f16>
+  给出了「别上全局嵌入模型」的关键判据：Descriptor Track 稳定落后 Matching Track 约 0.2 μAP，
+  说明区域 / 成对匹配才是我们该走的路。
+- **Detection of exact and similar partial copies for copyright protection of manga** ——
+  Sun, Kise，IJDAR 16(4), 2013。<https://doi.org/10.1007/s10032-013-0199-y>
+  少见的直接面向漫画版权检测的工作，确认了扫描版（印刷拷贝）可被检出。
+
+**开源项目**
+
+- **ComicDup**：本轮「结果分类」这个产品设计的思路来源——读它的代码后，我们把判重结果从「是否重复」升级成了带关系标签的输出。
+- [idealo/imagededup](https://github.com/idealo/imagededup)：提供了「给 ground truth 就能量化各算法优劣」的评测框架思路。
+- [knjcode/imgdupes](https://github.com/knjcode/imgdupes)：页级 ANN 索引（先找页近邻再聚合到书）的思路来源。
+- [simonmcnair/image-deduplicator](https://github.com/simonmcnair/image-deduplicator)：长宽比分桶预筛 + 并查集分组。
+- [0x90d/VideoDuplicateFinder](https://deepwiki.com/0x90d/videoduplicatefinder/4.1-main-window)：上三角循环、超阈值立即早退、SIMD 加速等工程技巧。
+- [imagehash](https://pypi.org/project/ImageHash/)：`crop_resistant_hash()` 是上文抗裁剪哈希论文的现成实现。
+
+---
+
 ## 一、隐私与安全承诺
 
 | 承诺 | 落实方式 |

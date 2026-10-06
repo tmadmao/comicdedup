@@ -2,10 +2,20 @@
 
 ## v1.1.0 —— 2026-10-07（比对算法重构：更快、更准、能抓「页数差大」的重复）
 
-这是首次发布之后的一次**算法级重构**，起因是用户拿真实库（3069 本 / 10.7 万页）实跑，
-发现比对阶段候选书对爆炸、精比慢到不可用。本轮先在真实库上做了量化定位，
-再综合学术调研（burstiness / Manga109 / cropping-resistant hash）与参考项目
-（ComicDup）的代码阅读，最终落地四项改动。
+### 遇到的问题
+
+首次发布后拿真实库（3069 本单行本 / 约 10.7 万页）实跑，比对阶段直接撞墙。在真实库上逐项量化定位后，问题集中在四处：
+
+1. **候选书对爆炸、精比慢到不可用**。最初候选 396 万对、精比预估 220 小时；
+   即便收敛到 1219 对，精比仍要 142 秒（占全流程 78%），而其中真正重复的只占 21.7%。
+2. **旧判据「偏移量 90 分位」会误杀真重复**。它要求页序整体单调，两三个离群点就能否掉整对——
+   实测一对有 **11 页图完全相同（相似度 1.00）** 的版本，就被版本多出来的 2 页整对否掉。
+3. **召回天花板卡在采样方式上**。旧「8 锚点 × ±2 页」对版本间页数差极敏感：
+   页数差 12% 时只能配上 4 页（170 页 vs 242 页的那对直接判重失败）。
+4. **假阳性来自漫画的公共页**。整套书共享的版权页 / 广告页 / 章扉页会让两本毫不相干的书
+   命中好几页（实测 1.9 万对共享 ≥2 页）；反过来，全书只有十几页的短篇又会被绝对门槛整批切掉。
+
+带着这四类问题做了一轮学术调研与开源项目代码阅读，最终落地下面这些改动。
 
 ### 改动
 
@@ -42,5 +52,51 @@
 
 - 采样方式变了 → `FEAT_VER` c1 → c2，旧缓存自动失效、需重扫一次。
 - 特征算法本身（页图块 / pHash / map16）未变，只是「抽哪几页」变了。
+
+### 致谢
+
+本轮重构不是拍脑袋改的：上面那四类问题，每一条在文献和开源实现里都有名字、有人踩过。
+在此对这轮调研中读到的论文与项目一并致谢。
+
+**学术论文**
+
+- **On the burstiness of visual elements** —— Hervé Jégou, Matthijs Douze, Cordelia Schmid，CVPR 2009。
+  <http://vigir.missouri.edu/~gdesouza/Research/Conference_CDs/IEEE_CVPR_2009/data/papers/1530.pdf>
+  本轮最核心的一篇。它定义了「同一个视觉元素反复出现导致的相似度放大」，并给出三种对策，
+  其中的 MMR（一对一匹配）正是我们「一对一匹配页数」判据的理论出处；
+  我们实测的「共享版权页导致候选爆炸」就是 burstiness 的教科书案例。
+- **To Aggregate or Not to Aggregate: Selective Match Kernels for Image Search** ——
+  Giorgos Tolias, Yannis Avrithis, Hervé Jégou，ICCV 2013 / IJCV 2015。
+  <http://image.ntua.gr/iva/files/Tolias_ijcv15_iasmk.pdf>
+  两级阈值结构（`τ_l` 描述子级 + `τ_g` 图像级）来自这里，直接启发了本轮的
+  「命中数 + 成链数」双门槛与链长地板（`--chain-floor`）。
+- **Sketch-based Manga Retrieval using Manga109 Dataset** —— Yusuke Matsui 等，
+  Multimedia Tools and Applications 76(20), 2017。<https://arxiv.org/abs/1510.04389>
+  明确指出漫画是黑白线稿、缺少渐变，SIFT 一类为自然图像设计的描述子会失效，
+  正确做法是「去网点 + 边缘方向直方图（EOH）」。这是后续对付
+  「自制扫描版 vs 官方 DL 版」的思路来源（本轮未落地）。
+- **Separation of Manga Line Drawings and Screentones** ——
+  Ito, Matsui, Yamasaki, Aizawa，Eurographics 2015 Short Papers。
+  <https://www.researchgate.net/publication/277653033>
+  上一条的去网点具体算法：LoG + flow-based DoG 双 mask 按连通分量合并，无需人工调参。
+- **Efficient Cropping-Resistant Robust Image Hashing** ——
+  Martin Steinebach, Huajian Liu, York Yannikos，ARES 2014。<https://doi.org/10.1109/ARES.2014.85>
+  提供了「不要猜黑边在哪，而是分段各算一个哈希」的思路，对照出我们现行裁边策略的局限。
+- **Results and findings of the 2021 Image Similarity Challenge** —— Papakipos 等，NeurIPS 2021。
+  <https://lacuna.tiptreesystems.com/paper/results-and-findings-of-the-2021-image-similarity-challenge/art_59c6a437064c4d06ab84282c17f95f16>
+  给出了「别上全局嵌入模型」的关键判据：Descriptor Track 稳定落后 Matching Track 约 0.2 μAP，
+  说明区域 / 成对匹配才是我们该走的路。
+- **Detection of exact and similar partial copies for copyright protection of manga** ——
+  Sun, Kise，IJDAR 16(4), 2013。<https://doi.org/10.1007/s10032-013-0199-y>
+  少见的直接面向漫画版权检测的工作，确认了扫描版（印刷拷贝）可被检出。
+
+**开源项目**
+
+- **ComicDup**：本轮「结果分类」这个产品设计的思路来源——读它的代码后，我们把判重结果从「是否重复」升级成了带关系标签的输出。
+- [idealo/imagededup](https://github.com/idealo/imagededup)：提供了「给 ground truth 就能量化各算法优劣」的评测框架思路。
+- [knjcode/imgdupes](https://github.com/knjcode/imgdupes)：页级 ANN 索引（先找页近邻再聚合到书）的思路来源。
+- [simonmcnair/image-deduplicator](https://github.com/simonmcnair/image-deduplicator)：长宽比分桶预筛 + 并查集分组。
+- [0x90d/VideoDuplicateFinder](https://deepwiki.com/0x90d/videoduplicatefinder/4.1-main-window)：上三角循环、超阈值立即早退、SIMD 加速等工程技巧。
+- [imagehash](https://pypi.org/project/ImageHash/)：`crop_resistant_hash()` 是上文抗裁剪哈希论文的现成实现。
 
 ## v1.0.0 —— 2026-10-05（首次发布）
