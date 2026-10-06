@@ -1,0 +1,27 @@
+# 换行符策略 —— 保证 clone 到 Windows 上直接能用，不用手动转换。
+#
+# 批处理脚本必须是 CRLF：cmd.exe 解析 LF 结尾的 .bat 时，
+# 遇到 goto / 标签 / 行尾续行符 ^ 都有概率出错（本机踩过）。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 其它文本统一 LF（仓库在 Windows 上开发，但保持和其它平台一致）
+*.py   text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+*.json text eol=lf
+
+# 二进制文件：禁止任何换行符转换，否则文件会损坏
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.webp   binary
+*.ico    binary
+*.exe    binary
+*.dll    binary
+*.zip    binary
+*.7z     binary
+*.rar    binary
+*.sqlite binary
