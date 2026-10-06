@@ -48,10 +48,10 @@ def chk(cond, name, extra=""):
 def fake_groups(root: Path) -> list:
     """造两组假的重复结果（带真实文件与缩略图，才能验证渲染路径）。"""
     from PIL import Image
-    thumb_dir = Path(os.environ["COMICDEDUP_DATA_DIR"]) / "thumbs"
-    thumb_dir.mkdir(parents=True, exist_ok=True)
+    import io as _io
 
-    def thumb(name, seed):
+    def thumb(seed):
+        """造一张假缩略图，返回 JPEG 字节（缩略图存在库里，不落盘）。"""
         a = Image.new("L", (300, 430), 255)
         px = a.load()
         for y in range(0, 430, 7):
@@ -61,9 +61,9 @@ def fake_groups(root: Path) -> list:
                         for dx in range(4):
                             if x + dx < 300 and y + dy < 430:
                                 px[x + dx, y + dy] = 20
-        p = thumb_dir / name
-        a.save(p, "JPEG", quality=80)
-        return name
+        buf = _io.BytesIO()
+        a.save(buf, "JPEG", quality=80)
+        return buf.getvalue()
 
     def mkfile(rel, size):
         p = root / rel
@@ -75,30 +75,30 @@ def fake_groups(root: Path) -> list:
     g1.members = [
         Member(book_id=1, path=str(mkfile("火影忍者 第01卷 [官方DL].7z", 3200)),
                kind="archive", fmt="7z", size=3_279_320, pages=180, sampled=40,
-               px=3_200_000, thumb=thumb("t1.jpg", 1), keep=False, score=0.91,
+               px=3_200_000, thumb_img=thumb(1), keep=False, score=0.91,
                matched=6, ratio=0.86, pairs=[(11, 13, 0.95), (29, 31, 0.93), (47, 49, 0.90)]),
         Member(book_id=2, path=str(mkfile("火影忍者 第01卷 [自制扫描].zip", 2600)),
                kind="archive", fmt="zip", size=2_716_434, pages=182, sampled=40,
-               px=3_100_000, thumb=thumb("t2.jpg", 2), keep=True, score=0.88,
+               px=3_100_000, thumb_img=thumb(2), keep=True, score=0.88,
                matched=5, ratio=0.72, pairs=[(10, 13, 0.94), (28, 31, 0.91)]),
     ]
     g2 = Group(gid=2, score=1.0, matched=7)
     g2.members = [
         Member(book_id=3, path=str(mkfile("海贼王 第10卷/f1.jpg", 10)),
                kind="folder", fmt="folder", size=5_833_654, pages=8, sampled=7,
-               px=2_050_000, thumb=thumb("t3.jpg", 3), keep=True, score=1.0, matched=7,
+               px=2_050_000, thumb_img=thumb(3), keep=True, score=1.0, matched=7,
                ratio=1.0, pairs=[(1, 1, 1.0)]),
         Member(book_id=4, path=str(mkfile("海贼王 第10卷 (重打包).7z", 12)),
                kind="archive", fmt="7z", size=2_103_574, pages=8, sampled=7,
-               px=2_050_000, thumb="", keep=False, score=1.0, matched=7, ratio=1.0, pairs=[]),
+               px=2_050_000, thumb_img=b"", keep=False, score=1.0, matched=7, ratio=1.0, pairs=[]),
     ]
     g3 = Group(gid=3, score=0.7, matched=3)
     g3.members = [
         Member(book_id=5, path=str(mkfile("第三组 A.zip", 9)), kind="archive", fmt="zip",
-               size=100, pages=9, sampled=9, px=1000, thumb="", keep=True, score=0.7,
+               size=100, pages=9, sampled=9, px=1000, thumb_img=b"", keep=True, score=0.7,
                matched=3, ratio=0.33, pairs=[]),
         Member(book_id=6, path=str(mkfile("第三组 B.rar", 9)), kind="archive", fmt="rar",
-               size=100, pages=9, sampled=9, px=1000, thumb="", keep=False, score=0.7,
+               size=100, pages=9, sampled=9, px=1000, thumb_img=b"", keep=False, score=0.7,
                matched=3, ratio=0.33, pairs=[]),
     ]
     return [g1, g2, g3]

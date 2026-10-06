@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import io
 import logging
+import os
 import re
 import sys
 import time
@@ -196,7 +197,10 @@ def cmd_regroup(a) -> int:
 
 
 def cmd_scan(a) -> int:
-    root = Path(a.scan).expanduser().resolve()
+    # 刻意用 abspath 而不是 Path.resolve()：在 Windows 上 resolve() 会把**映射的
+    # 网络盘符**（如 M:\）解析成 UNC 目标（\\NAS\分享\），于是命令行扫出来的路径
+    # 和界面里用盘符扫出来的路径变成两套 —— 同一本书在缓存里存两份，谁也命中不了谁。
+    root = Path(os.path.abspath(os.path.expanduser(a.scan)))
     if not root.is_dir():
         say(f"[FAIL] 目录不存在：{root}")
         return 2

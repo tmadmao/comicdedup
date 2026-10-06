@@ -17,7 +17,7 @@ import os
 import sys
 from pathlib import Path
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 APP_NAME = "漫画查重"
 APP_EN = "ComicDedup"
 
@@ -27,6 +27,60 @@ __all__ = ["__version__", "APP_NAME", "APP_EN", "data_dir", "is_frozen", "app_ro
 def is_frozen() -> bool:
     """是否运行在 PyInstaller 打包出的 exe 里。"""
     return bool(getattr(sys, "frozen", False))
+
+
+_DRIVE_MAP: dict | None = None
+
+
+def drive_map() -> dict:
+    """Windows 上「网络盘符 → UNC 共享」的反查表：``{'\\\\nas\\漫画': 'M:'}``。
+
+    键统一小写，因为 Windows 的主机名/共享名不区分大小写
+    （实测盘符给出的是 ``\\\\Dx4600-a887\\漫画``，而扫描路径里可能是全大写）。
+    非 Windows 或查询失败时返回空表，调用方静默降级。
+    """
+    global _DRIVE_MAP
+    if _DRIVE_MAP is not None:
+        return _DRIVE_MAP
+    m: dict = {}
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            mpr = ctypes.WinDLL("mpr")
+            buf = ctypes.create_unicode_buffer(512)
+            for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+                n = wintypes.DWORD(512)
+                if mpr.WNetGetConnectionW(c + ":", ctypes.byref(buf),
+                                          ctypes.byref(n)) == 0:
+                    m[buf.value.rstrip("\\").lower()] = c + ":"
+        except Exception:
+            pass
+    _DRIVE_MAP = m
+    return m
+
+
+def norm_path(p) -> str:
+    """把路径收敛成**盘符形式**，让同一本书只有一种写法。
+
+    为什么要归一：`Path.resolve()` 在 Windows 上会把映射的网络盘符展开成 UNC
+    （``M:\\漫画\\a.zip`` → ``\\\\NAS\\漫画\\a.zip``），于是「用盘符扫」和
+    「用命令行扫」会在缓存里留下**两套路径的同一本书**。后果不只是缓存命中不了，
+    更糟的是分组时两本书都读进来 —— 同一本书自己跟自己判重（实测过：组数从
+    294 暴增到 2621）。归一之后这个问题从根上消失。
+    """
+    s = str(p or "").replace("/", "\\")
+    if s.startswith("\\\\"):
+        parts = s.rstrip("\\").split("\\")
+        for i in range(len(parts), 1, -1):
+            drv = drive_map().get("\\".join(parts[:i]).lower())
+            if drv:
+                rest = parts[i:]
+                s = drv + "\\" + "\\".join(rest)
+                break
+    if len(s) >= 2 and s[1] == ":" and s[0].isalpha():
+        s = s[0].upper() + s[1:]
+    return s.rstrip("\\") if len(s) > 3 else s
 
 
 def app_root() -> Path:

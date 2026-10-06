@@ -124,7 +124,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scan_thread: ScanThread | None = None
         self.group_thread: GroupThread | None = None
         self.del_thread: DeleteThread | None = None
-        self.thumb_dir = data_dir() / "thumbs"
         self.root: Path | None = None
         self._build_ui()
         self._load_cfg()
@@ -662,7 +661,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 it.setFlags(q("ItemFlag.ItemIsEnabled") | q("ItemFlag.ItemIsSelectable")
                             | q("ItemFlag.ItemIsUserCheckable"))
                 it.setCheckState(0, q("CheckState.Unchecked"))
-                ic = self._thumb_icon(m.thumb)
+                ic = self._thumb_icon(m.thumb_img)
                 if ic is not None:
                     it.setIcon(0, ic)
                 it.setData(0, q("ItemDataRole.UserRole"), m)
@@ -672,14 +671,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tree.blockSignals(False)
         self._apply_filter()
 
-    def _thumb_icon(self, name: str):
-        if not name:
+    def _thumb_icon(self, data: bytes):
+        """由**缩略图字节**构造图标（缩略图存在库里，不落盘成文件）。"""
+        if not data:
             return None
-        p = self.thumb_dir / name
-        if not p.exists():
-            return None
-        pm = QtGui.QPixmap(str(p))
-        if pm.isNull():
+        pm = QtGui.QPixmap()
+        if not pm.loadFromData(bytes(data), "JPEG"):
             return None
         return QtGui.QIcon(pm)
 
@@ -709,7 +706,7 @@ class MainWindow(QtWidgets.QMainWindow):
             f"组内相似度：{m.score:.3f}　　成链页数：{m.matched}　"
             f"命中率：{m.ratio:.0%}" + (f"\n关系：{m.relation}" if m.relation else "") + "\n"
             f"路径：{m.path}")
-        pm = self._preview_pixmap(m.thumb)
+        pm = self._preview_pixmap(m.thumb_img)
         if pm is not None:
             self.lb_cover.setPixmap(pm)
         else:
@@ -721,14 +718,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.tb_pairs.setItem(r, 1, QtWidgets.QTableWidgetItem(str(ib)))
             self.tb_pairs.setItem(r, 2, QtWidgets.QTableWidgetItem(f"{sc:.3f}"))
 
-    def _preview_pixmap(self, name: str):
-        if not name:
+    def _preview_pixmap(self, data: bytes):
+        if not data:
             return None
-        p = self.thumb_dir / name
-        if not p.exists():
-            return None
-        pm = QtGui.QPixmap(str(p))
-        if pm.isNull():
+        pm = QtGui.QPixmap()
+        if not pm.loadFromData(bytes(data), "JPEG"):
             return None
         return pm.scaledToHeight(PREVIEW_H, q("TransformationMode.SmoothTransformation"))
 
@@ -880,7 +874,7 @@ class MainWindow(QtWidgets.QMainWindow):
         r = QtWidgets.QMessageBox.question(
             self, "清空缓存数据库",
             f"当前缓存：{st['books']} 本 / {st['sampled']} 页特征。\n\n"
-            f"清空后下次扫描需要全部重算（3000 本可能要几小时）。\n"
+            f"清空后下次扫描需要全部重算，漫画数量越多，耗时越久。\n"
             f"不会删除任何漫画文件。是否继续？",
             MB_YES | MB_NO,
             MB_NO)

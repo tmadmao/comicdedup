@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import sqlite3
 import threading
 import time
@@ -25,7 +26,7 @@ import zlib
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
-from . import __version__, data_dir
+from . import __version__, data_dir, norm_path
 from .core import FEAT_VER, TILE, TILE_SMALL
 
 log = logging.getLogger("comicdedup")
@@ -49,7 +50,11 @@ CREATE TABLE IF NOT EXISTS books (
     blanks      INTEGER NOT NULL DEFAULT 0,
     feat_ver    TEXT NOT NULL,
     crop_mode   TEXT NOT NULL DEFAULT '',
-    thumb       TEXT NOT NULL DEFAULT '',
+    -- 缩略图**直接存进库里**（JPEG 字节），不再落盘成独立文件。
+    -- 原因见 _migrate_thumbs 的说明：批量生成 6000+ 个随机哈希命名的 jpg，
+    -- 在行为型杀软眼里与勒索软件「加密后重写文件」高度相似，会被报成敲诈病毒。
+    thumb_img   BLOB,
+    thumb       TEXT NOT NULL DEFAULT '',   -- 兼容旧版：曾是 thumbs 目录下的文件名
     status      TEXT NOT NULL DEFAULT 'ok',   -- ok / empty / error
     error       TEXT NOT NULL DEFAULT '',
     scanned_at  REAL NOT NULL
@@ -110,6 +115,71 @@ class FeatureCache:
             self.conn.executescript(SCHEMA)
             self.conn.commit()
         self._pending_pages: list = []
+        with self._lock:
+            self._ensure_columns()
+            self._migrate_thumbs()
+
+    # -------------------------------------------------- 建库后的演进
+
+    def _ensure_columns(self):
+        """给**旧库**补上后加的列（CREATE TABLE IF NOT EXISTS 不会改已有表）。"""
+        with self._lock:
+            cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(books)")}
+            if "thumb_img" not in cols:
+                self.conn.execute("ALTER TABLE books ADD COLUMN thumb_img BLOB")
+                self.conn.commit()
+
+    def _migrate_thumbs(self):
+        """把散落在 ``thumbs/`` 目录里的旧缩略图搬进数据库，然后删掉那个目录。
+
+        **为什么必须搬走**：早期版本每扫一本书就往 ``%LOCALAPPDATA%\\ComicDedup\\thumbs\\``
+        写一个 jpg，文件名是 ``sha1(路径)[:20]``（例如 ``00074a51afb55c6cd78e.jpg``）。
+        3000 本就是 6000+ 个**随机哈希命名**的图片文件，短时间内批量生成 ——
+        这个行为模式与勒索软件「加密文档后重写」高度重合，360 等国产杀软的
+        行为型引擎（QVM）会直接报成**敲诈病毒**。程序本身当然没有任何加密行为，
+        但行为指纹撞上了就是撞上了，改行为比解释更有效。
+
+        缩略图只是界面上的一张封面预览（约 19 KB），存进 SQLite 完全没有压力，
+        而且顺带解决了另外两个老问题：旧缩略图**只增不减**（清缓存也删不掉），
+        以及几千个小文件带来的目录开销。
+        """
+        tdir = data_dir() / "thumbs"
+        if not tdir.is_dir():
+            return
+        try:
+            with self._lock:
+                rows = self.conn.execute(
+                    "SELECT id, thumb FROM books WHERE (thumb_img IS NULL OR thumb_img = X'') "
+                    "AND thumb != ''").fetchall()
+            if not rows:
+                n = 0
+            else:
+                n = 0
+                for r in rows:
+                    fp = tdir / r["thumb"]
+                    try:
+                        data = fp.read_bytes()
+                    except OSError:
+                        continue
+                    if not data:
+                        continue
+                    with self._lock:
+                        self.conn.execute("UPDATE books SET thumb_img=? WHERE id=?",
+                                          (sqlite3.Binary(data), r["id"]))
+                    n += 1
+                with self._lock:
+                    self.conn.commit()
+            # 迁移完就不再需要这个目录了：里面只有我们自己生成的缓存图片。
+            # 留着既占空间，又会让杀软的行为引擎继续盯着。
+            # 只有当「该搬的都搬成了」才删目录。若一个都没搬成功（文件读不到、
+            # 权限问题等），保留现场 —— 缩略图丢了不影响查重，但没必要平白丢掉。
+            if rows and n == 0:
+                log.warning("缩略图一张也没搬成，保留原目录 %s", tdir)
+                return
+            shutil.rmtree(tdir, ignore_errors=True)
+            log.info("缩略图已迁入数据库 %d 张，并删除旧缓存目录 %s", n, tdir)
+        except Exception as e:                       # 迁移失败不影响主流程
+            log.warning("缩略图迁移失败（忽略）：%s", e)
 
     # -------------------------------------------------- 元信息
 
@@ -128,6 +198,7 @@ class FeatureCache:
 
     def lookup(self, path: str, size: int, mtime: float, crop_mode: str) -> Optional[dict]:
         """查缓存。命中返回字典（含 pages 行），否则 None。"""
+        path = norm_path(path)
         with self._lock:
             row = self.conn.execute(
                 "SELECT * FROM books WHERE path=? AND size=? AND mtime=? AND feat_ver=? "
@@ -152,18 +223,24 @@ class FeatureCache:
 
     def put_book(self, path: str, kind: str, fmt: str, size: int, mtime: float,
                  pages: int, sampled: int, blanks: int, crop_mode: str,
-                 thumb: str = "", status: str = "ok", error: str = "") -> int:
+                 thumb: bytes = b"", status: str = "ok", error: str = "") -> int:
+        """写入/更新一本书的元信息。
+
+        ``thumb`` 现在是**缩略图的 JPEG 字节**（直接存进库，不再落盘成文件）。
+        """
+        path = norm_path(path)
         with self._lock:
             cur = self.conn.execute(
                 "INSERT INTO books(path,kind,fmt,size,mtime,pages,sampled,blanks,feat_ver,"
-                "crop_mode,thumb,status,error,scanned_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "crop_mode,thumb_img,status,error,scanned_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(path) DO UPDATE SET kind=excluded.kind, fmt=excluded.fmt, "
                 "size=excluded.size, mtime=excluded.mtime, pages=excluded.pages, "
                 "sampled=excluded.sampled, blanks=excluded.blanks, feat_ver=excluded.feat_ver, "
-                "crop_mode=excluded.crop_mode, thumb=excluded.thumb, status=excluded.status, "
+                "crop_mode=excluded.crop_mode, thumb_img=excluded.thumb_img, status=excluded.status, "
                 "error=excluded.error, scanned_at=excluded.scanned_at",
                 (path, kind, fmt, int(size), float(mtime), int(pages), int(sampled),
-                 int(blanks), FEAT_VER, crop_mode, thumb, status, error, time.time()))
+                 int(blanks), FEAT_VER, crop_mode,
+                 sqlite3.Binary(thumb) if thumb else None, status, error, time.time()))
             bid = cur.lastrowid
             if not bid or bid == 0:
                 r = self.conn.execute("SELECT id FROM books WHERE path=?", (path,)).fetchone()
@@ -232,12 +309,21 @@ class FeatureCache:
                 f"ORDER BY b.id, p.idx", (FEAT_VER,)).fetchall()
         return [dict(r) for r in rows]
 
-    def book_meta(self) -> list:
+    def book_meta(self, with_thumb: bool = True) -> list:
+        """所有书的元信息。``with_thumb=False`` 时不取缩略图字节（省内存）。"""
+        cols = ("id,path,kind,fmt,size,mtime,pages,sampled,blanks,"
+                + ("thumb_img,thumb," if with_thumb else "")
+                + "status,error")
         with self._lock:
             rows = self.conn.execute(
-                "SELECT id,path,kind,fmt,size,mtime,pages,sampled,blanks,thumb,status,error "
-                "FROM books WHERE feat_ver=? ORDER BY path", (FEAT_VER,)).fetchall()
-        return [dict(r) for r in rows]
+                f"SELECT {cols} FROM books WHERE feat_ver=? ORDER BY path",
+                (FEAT_VER,)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["thumb_img"] = bytes(d["thumb_img"]) if d.get("thumb_img") else b""
+            out.append(d)
+        return out
 
     def tiles_for_books(self, book_ids: Sequence[int]) -> dict:
         """取指定书的页图块：{book_id: [(idx, tile_bytes, map16, phash, px), ...]}。
@@ -302,10 +388,48 @@ class FeatureCache:
                                   "(SELECT id FROM books WHERE feat_ver != ?)", (FEAT_VER,))
                 self.conn.execute("DELETE FROM books WHERE feat_ver != ?", (FEAT_VER,))
                 log.info("清掉旧特征版本的缓存 %d 本（feat_ver 已升级）", n_old)
+            self._normalize_paths()
             cur = self.conn.execute("INSERT INTO scans(root,started_at) VALUES(?,?)",
                                     (root, time.time()))
             self.conn.commit()
             return int(cur.lastrowid)
+
+    def _normalize_paths(self):
+        """把库里已有的路径统一成盘符形式，并合并因此撞在一起的同名记录。
+
+        早期命令行用 ``Path.resolve()`` 展开网络盘符，留下了一批 UNC 路径
+        （``\\\\NAS\\漫画\\a.zip``）；界面里填的是盘符（``M:\\a.zip``）。
+        同一本书两种写法 = 两条记录 = 分组时自己跟自己判重。这里在每次扫描开始前
+        把存量记录一并收敛，重复者只留最近扫过的那一条。
+        """
+        rows = self.conn.execute("SELECT id, path, scanned_at FROM books").fetchall()
+        if not rows:
+            return
+        changed = 0
+        keep: dict = {}
+        drop: list = []
+        for r in rows:
+            new = norm_path(r["path"])
+            if new != r["path"]:
+                changed += 1
+            prev = keep.get(new)
+            if prev is None:
+                keep[new] = (r["id"], float(r["scanned_at"] or 0))
+            else:
+                # 同一本书两种写法 → 丢掉扫得较早的那条
+                if float(r["scanned_at"] or 0) >= prev[1]:
+                    drop.append(prev[0])
+                    keep[new] = (r["id"], float(r["scanned_at"] or 0))
+                else:
+                    drop.append(r["id"])
+        for bid in drop:
+            self.conn.execute("DELETE FROM pages WHERE book_id=?", (bid,))
+            self.conn.execute("DELETE FROM books WHERE id=?", (bid,))
+        for new, (bid, _t) in keep.items():
+            self.conn.execute("UPDATE books SET path=? WHERE id=?", (new, bid))
+        self.conn.commit()
+        if changed or drop:
+            log.info("路径归一：改写 %d 条，合并重复记录 %d 条", changed, len(drop))
 
     def end_scan(self, scan_id: int, n_books: int, n_groups: int, note: str = ""):
         with self._lock:

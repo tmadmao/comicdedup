@@ -178,8 +178,7 @@ class ScanWorker:
         self._log_lock = threading.Lock()    # 串行化日志/进度输出，避免整行被交错
         self.stats = ScanStats()
         self.errors: list = []
-        self.thumb_dir = data_dir() / "thumbs"
-        self.thumb_dir.mkdir(parents=True, exist_ok=True)
+        # 缩略图现在直接存进 SQLite（见 _save_thumb 的说明），不再需要 thumbs 目录。
 
     # ---------------- 控制
     def pause(self):
@@ -334,7 +333,7 @@ class ScanWorker:
         try:
             A.stat_book(b)
             self.cache.put_book(str(b.path), b.kind, b.fmt, b.size, b.mtime, 0, 0, 0,
-                                self.s.crop_mode, thumb="", status="error", error=msg[:300])
+                                self.s.crop_mode, thumb=b"", status="error", error=msg[:300])
         except Exception:
             pass
 
@@ -379,7 +378,7 @@ class ScanWorker:
     # ---------------- 压缩包
     def _scan_archive(self, b: A.BookEntry):
         s = self.s
-        thumb = ""
+        thumb = b""
         try:
             bk = A.open_book(b.path)
         except A.ArchiveError as e:
@@ -401,7 +400,7 @@ class ScanWorker:
                     first = bk.read(names[0])
                     thumb = self._save_thumb(b.path, first)
                 except Exception:
-                    thumb = ""
+                    thumb = b""
 
             data, read_note = self._read_members(bk, names, want)
             feats, blanks, failed, no_bytes = [], 0, 0, 0
@@ -490,12 +489,12 @@ class ScanWorker:
         if n_img == 0:
             return None, 0, [], 0, "", "目录内没有图片"
         want = sample_indices(n_img, s.anchors, s.window, s.max_pages)
-        thumb = ""
+        thumb = b""
         if s.make_thumbs:
             try:
                 thumb = self._save_thumb(b.path, files[0].read_bytes())
             except Exception:
-                thumb = ""
+                thumb = b""
         feats, blanks, failed = [], 0, 0
         for idx in want:
             try:
@@ -519,9 +518,16 @@ class ScanWorker:
         return book_id, n_img, feats, blanks, thumb, ""
 
     # ---------------- 缩略图
-    def _save_thumb(self, src: Path, data: bytes) -> str:
+    def _save_thumb(self, src: Path, data: bytes) -> bytes:
+        """把首图缩成一张封面预览，**返回 JPEG 字节**（由调用方存进 SQLite）。
+
+        ⚠ 这里刻意**不写文件**。早期版本会往 ``thumbs/`` 目录写一个
+        ``sha1(路径)[:20].jpg``，3000 本就是 6000+ 个随机哈希命名的图片文件 ——
+        批量生成随机名文件这个行为与勒索软件「加密后重写」高度相似，
+        被 360 的行为型引擎判成敲诈病毒。缩略图只有约 19 KB，存进库里更省事，
+        也不会再触发这类误报。
+        """
         try:
-            import hashlib
             from PIL import Image
             import io as _io
             im = Image.open(_io.BytesIO(data))
@@ -530,18 +536,11 @@ class ScanWorker:
             h = 300
             w = max(1, int(im.width * h / max(1, im.height)))
             im = im.resize((w, h), Image.LANCZOS)
-            key = hashlib.sha1(str(src).encode("utf-8", "replace")).hexdigest()[:20]
-            out = self.thumb_dir / f"{key}.jpg"
-            im.save(out, format="JPEG", quality=82)
-            return out.name
+            buf = _io.BytesIO()
+            im.save(buf, format="JPEG", quality=82)
+            return buf.getvalue()
         except Exception:
-            return ""
-
-    def thumb_path(self, name: str) -> Optional[Path]:
-        if not name:
-            return None
-        p = self.thumb_dir / name
-        return p if p.exists() else None
+            return b""
 
 
 # ------------------------------------------------------------------ 分组
@@ -557,7 +556,7 @@ class Member:
     pages: int = 0
     sampled: int = 0
     px: int = 0
-    thumb: str = ""
+    thumb_img: bytes = b""    # 封面缩略图的 JPEG 字节（存库，不落盘）
     keep: bool = False
     score: float = 0.0
     matched: int = 0          # 成链页数（页序对得上的页数）
@@ -1020,7 +1019,7 @@ def group_books(cache: FeatureCache, settings: GroupSettings,
             m = Member(book_id=bid, path=bm.get("path", ""), kind=bm.get("kind", ""),
                        fmt=bm.get("fmt", ""), size=int(bm.get("size", 0)),
                        pages=int(bm.get("pages", 0)), sampled=int(bm.get("sampled", 0)),
-                       thumb=bm.get("thumb", "") or "")
+                       thumb_img=bm.get("thumb_img") or b"")
             pxs = px_by_book.get(bid) or []
             m.px = int(np.median(pxs)) if pxs else 0
             rel = by_book.get(bid, [])
