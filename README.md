@@ -35,9 +35,10 @@ Windows 本地漫画查重桌面程序。**纯本地离线运行**，专门解�
 
 ### 方式 A：直接用 exe（推荐给不想装 Python 的人）
 
-1. 下载 `ComicDedupTool.exe`
+1. 到 [Releases](https://github.com/tmadmao/comicdedup/releases) 下载 `ComicDedupTool.exe`
 2. 双击打开 → 选漫画根目录 → 开始扫描
 
+> 还没发布 exe？双击 `打包exe.bat` 就能在本机自己打一个出来（需要先装 Python 依赖）。
 > 首次启动要把约 100MB 解压到临时目录，5~10 秒属正常。
 > **7z / rar 的解压需要本机装有 [7-Zip](https://www.7-zip.org/) 或 WinRAR**（zip 不需要）。
 > 也可以把 `7z.exe` 直接放到 exe 同目录，程序会自动识别。
