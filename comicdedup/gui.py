@@ -233,8 +233,27 @@ class MainWindow(QtWidgets.QMainWindow):
         grid.addWidget(self.sl_ratio, 2, 7)
         grid.addWidget(self.lb_ratio, 2, 8)
 
+        # 第三行：CPU 线程数（扫描与精比两个阶段共用）
+        grid.addWidget(QtWidgets.QLabel("CPU 线程数"), 3, 0)
+        self.cb_jobs = QtWidgets.QComboBox()
+        for label, val in (("自动", 0), ("1（单线程）", 1), ("2", 2), ("4", 4),
+                           ("6", 6), ("8", 8), ("12", 12), ("16", 16)):
+            self.cb_jobs.addItem(label, val)
+        self.cb_jobs.setMaximumWidth(120)
+        self.cb_jobs.setToolTip(
+            "扫描与精比各用几个线程。\n"
+            "「自动」= min(8, CPU 逻辑核数)，一般就是最合适的选择。\n"
+            "漫画放在 NAS 上时，适当调高可以把网络等待重叠掉（比如核数的 1.5~2 倍）；\n"
+            "放在本地磁盘时不要超过 CPU 逻辑核数太多，否则互相抢核反而更慢。")
+        self.cb_jobs.currentIndexChanged.connect(self._on_jobs_hint)
+        grid.addWidget(self.cb_jobs, 3, 1)
+        self.lb_jobs = QtWidgets.QLabel()
+        self.lb_jobs.setStyleSheet("color:#666;")
+        grid.addWidget(self.lb_jobs, 3, 2, 1, 5)
+
         grid.setColumnStretch(4, 1)
         self.on_preset("标准")
+        self._on_jobs_hint()
         return box
 
     # ---- 树
@@ -434,6 +453,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sl_sim.setValue(int(d.get("sim", 0.62) * 100))
         self.sp_min.setValue(int(d.get("min_pages", 3)))
         self.sl_ratio.setValue(int(d.get("ratio", 0.25) * 100))
+        idx = self.cb_jobs.findData(int(d.get("jobs", 0)))
+        self.cb_jobs.setCurrentIndex(idx if idx >= 0 else 0)
+        self._on_jobs_hint()
         self._on_slider()
 
     def _save_cfg(self):
@@ -443,6 +465,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 "root": self.ed_root.text(), "preset": self.cb_preset.currentText(),
                 "sim": self.sl_sim.value() / 100.0, "min_pages": self.sp_min.value(),
                 "ratio": self.sl_ratio.value() / 100.0,
+                "jobs": int(self.cb_jobs.currentData() or 0),
             }, ensure_ascii=False, indent=1), encoding="utf-8")
         except Exception:
             pass
@@ -466,13 +489,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # -------------------------------------------------------- ① 扫描
 
+    def _on_jobs_hint(self, *_a):
+        """把「自动」解析成实际线程数显示出来 —— 免得用户不知道自己跑了几线程。"""
+        import os
+        v = int(self.cb_jobs.currentData() or 0)
+        n = v if v > 0 else max(2, min(8, os.cpu_count() or 4))
+        self.lb_jobs.setText(f"本机 {os.cpu_count()} 个逻辑核，本次实际用 {n} 个线程")
+
     def _settings(self) -> ScanSettings:
         a, w, m = PRESETS.get(self.cb_preset.currentText(), PRESETS["标准"])
         return ScanSettings(root=Path(self.ed_root.text()), preset=self.cb_preset.currentText(),
                             anchors=a, window=w, max_pages=m, crop_mode=DEFAULT_CROP,
                             page_thr=self.sl_sim.value() / 100.0,
                             min_pages=self.sp_min.value(),
-                            ratio_thr=self.sl_ratio.value() / 100.0)
+                            ratio_thr=self.sl_ratio.value() / 100.0,
+                            threads=int(self.cb_jobs.currentData() or 0))
 
     def on_browse(self):
         d = QtWidgets.QFileDialog.getExistingDirectory(self, "选择漫画根目录",
@@ -570,7 +601,8 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         s = self._settings()
         gs = GroupSettings(page_thr=s.page_thr, min_pages=s.min_pages,
-                           ratio_thr=s.ratio_thr, coarse_thr=s.coarse_thr)
+                           ratio_thr=s.ratio_thr, coarse_thr=s.coarse_thr,
+                           threads=s.threads)
         if not silent:
             self.logline("info", f"重新分组：阈值 {gs.page_thr:.2f} / "
                                  f"最少 {gs.min_pages} 页 / 命中率 ≥ {gs.ratio_thr:.2f}")

@@ -582,7 +582,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="至少多少页匹配才算同一本（默认 3）")
     p.add_argument("--ratio", type=float, default=0.25, help="命中率下限（默认 0.25）")
     p.add_argument("--coarse", type=float, default=0.55, help="粗筛阈值（默认 0.55）")
-    p.add_argument("--jobs", type=int, default=0, help="精比线程数（默认自动）")
+    p.add_argument("--jobs", type=int, default=0,
+                   help="工作线程数，扫描与精比共用（默认 0=自动，即 min(8, CPU 核数)）")
     p.add_argument("--limit", type=int, default=0, help="只处理前 N 本（调试用）")
     p.add_argument("--show", type=int, default=20, help="命令行里最多打印几组")
     p.add_argument("--db", metavar="FILE", help="指定缓存数据库文件位置")

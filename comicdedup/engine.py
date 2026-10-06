@@ -23,7 +23,7 @@ import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Sequence
 
@@ -77,7 +77,7 @@ class ScanSettings:
     pre_min: int = 2             # 预筛：至少多少页对相似才进入精比
     # --- 其它
     max_books: int = 0           # 0 = 不限（调试用）
-    threads: int = 0             # 0 = 自动
+    threads: int = 0             # 工作线程数：0 = 自动（min(8, CPU 逻辑核数)）
 
     @classmethod
     def from_preset(cls, name: str, **kw) -> "ScanSettings":
@@ -150,7 +150,8 @@ class ScanWorker:
         self.on_log = on_log
         self._pause = threading.Event()
         self._stop = threading.Event()
-        self._n = threading.Semaphore(1)
+        self._stat_lock = threading.Lock()   # 保护 stats 计数（多线程并发累加）
+        self._log_lock = threading.Lock()    # 串行化日志/进度输出，避免整行被交错
         self.stats = ScanStats()
         self.errors: list = []
         self.thumb_dir = data_dir() / "thumbs"
@@ -175,18 +176,55 @@ class ScanWorker:
         while self._pause.is_set() and not self._stop.is_set():
             time.sleep(0.15)
 
+    def _bump(self, field_name: str, n: int = 1):
+        """原子地累加统计计数。
+
+        改成多线程扫描后，`stats.n_scanned += 1` 这种「读-改-写」会丢更新
+        —— 两个线程可能同时读到同一个旧值、各自加一、只写回一次。
+        所以所有计数统一走这里加锁。
+        """
+        with self._stat_lock:
+            setattr(self.stats, field_name, getattr(self.stats, field_name) + n)
+
+    def snapshot(self) -> ScanStats:
+        """取一份计数的即时快照（进度回调用，避免读到写了一半的值）。"""
+        with self._stat_lock:
+            return replace(self.stats)
+
+    def _workers(self) -> int:
+        """扫描阶段的工作线程数。``threads<=0`` 表示自动。
+
+        默认取 ``min(8, CPU 逻辑核数)``：这个阶段是「解码 + 十几个小算子」的混合负载，
+        本地盘时基本吃满 CPU，所以线程数不宜超过核数太多；读 NAS 时会有相当比例的时间
+        花在网络 I/O 上，适当调高（比如 1.5 倍核数）能把 I/O 等待重叠掉。
+        """
+        n = int(self.s.threads or 0)
+        if n <= 0:
+            n = max(2, min(8, os.cpu_count() or 4))
+        return max(1, min(64, n))
+
     def _say(self, msg: str, level: str = "info"):
-        if self.on_log:
-            try:
-                self.on_log(level, msg)
-            except Exception:
-                pass
-        if level == "error":
-            log.error(msg)
-        elif level == "warn":
-            log.warning(msg)
-        else:
-            log.info(msg)
+        # 多线程下日志来自不同线程，必须串行化，否则两行会交错成乱码
+        with self._log_lock:
+            if self.on_log:
+                try:
+                    self.on_log(level, msg)
+                except Exception:
+                    pass
+            if level == "error":
+                log.error(msg)
+            elif level == "warn":
+                log.warning(msg)
+            else:
+                log.info(msg)
+
+    def _progress(self, done: int, total: int, path: str):
+        if not self.on_progress:
+            return
+        try:
+            self.on_progress(done, total, path, self.snapshot())
+        except Exception:
+            pass
 
     # ---------------- 主流程
     def run(self) -> ScanStats:
@@ -207,23 +245,39 @@ class ScanWorker:
             self.stats.elapsed = time.time() - t0
             return self.stats
 
-        for i, b in enumerate(books, 1):
-            if self._stop.is_set():
-                self.stats.skipped = total - i + 1
-                self._say(f"已中断，剩余 {self.stats.skipped} 本未处理", "warn")
-                break
-            self._wait_if_paused()
+        nw = self._workers()
+        self._say(f"扫描线程数：{nw}（共 {total} 本）")
+        if nw > 1:
+            # 我们自己已经在「页」这一层并行了，绝不能让 OpenCV 内部再各开一套线程
+            # —— 否则 nw × OpenCV 自己的线程数 会互相抢核（6×6=36），反而更慢。
             try:
-                self._scan_one(b)
-            except Exception as e:                      # 单本失败绝不影响全局
-                self.stats.n_bad += 1
-                self._record_error(b, f"{type(e).__name__}: {e}")
-            if self.on_progress:
-                try:
-                    self.on_progress(i, total, str(b.path), self.stats)
-                except Exception:
-                    pass
-        self.cache.flush()
+                import cv2
+                cv2.setNumThreads(1)
+            except Exception:
+                pass
+
+        done = processed = 0
+        try:
+            # 任务一次性全提交，用 as_completed 收结果。
+            # 每个任务开头都会检查 _stop，所以按下「停止」后，仍在排队里的任务
+            # 会立刻空转返回，不会继续啃剩下的几千本。
+            with ThreadPoolExecutor(max_workers=nw, thread_name_prefix="scan") as ex:
+                futures = {ex.submit(self._scan_task, b): b for b in books}
+                for fut in as_completed(futures):
+                    done += 1
+                    try:
+                        if fut.result():
+                            processed += 1
+                    except Exception:
+                        pass                    # 任务体内部已兜底，这里是双保险
+                    self._progress(done, total, str(futures[fut].path))
+        finally:
+            # 正常结束、抛异常、Ctrl+C —— 缓冲里的页特征都必须落盘。
+            # 否则这些书会留下「有记录、零页」的不完整行（重跑虽会自愈，但白算一遍）。
+            self.cache.flush()
+        self.stats.skipped = max(0, total - processed)
+        if self.stats.skipped:
+            self._say(f"已中断，{self.stats.skipped} 本未处理", "warn")
         self.stats.elapsed = time.time() - t0
         self._say(f"扫描完成：{self.stats.n_books} 本，"
                   f"新算 {self.stats.n_scanned} 本 / 缓存命中 {self.stats.n_cached} 本，"
@@ -232,6 +286,24 @@ class ScanWorker:
         return self.stats
 
     # ---------------- 单本
+    def _scan_task(self, b: A.BookEntry) -> bool:
+        """一个工作单元（可能跑在工作线程里）。返回 False 表示因「停止」被跳过。
+
+        专门抽成一个方法、而不是把逻辑塞进 ``submit()`` 的 lambda，是为了让异常
+        边界清楚：任何一本书的失败都只影响它自己，绝不把整个扫描带崩。
+        """
+        if self._stop.is_set():
+            return False
+        self._wait_if_paused()
+        if self._stop.is_set():
+            return False
+        try:
+            self._scan_one(b)
+        except Exception as e:                      # 单本失败绝不影响全局
+            self._bump("n_bad")
+            self._record_error(b, f"{type(e).__name__}: {e}")
+        return True
+
     def _record_error(self, b: A.BookEntry, msg: str):
         self.errors.append((str(b.path), msg))
         self._say(f"跳过（{b.path.name}）：{msg}", "error")
@@ -251,13 +323,13 @@ class ScanWorker:
             hit = self.cache.lookup(key, b.size, b.mtime, s.crop_mode)
             if hit and hit.get("pages") and hit.get("status") == "ok":
                 self.cache.touch(int(hit["id"]))
-                self.stats.n_cached += 1
-                self.stats.n_pages += len(hit["pages"])
+                self._bump("n_cached")
+                self._bump("n_pages", len(hit["pages"]))
                 return
             if hit and hit.get("status") == "error":
                 # 上次就是坏的；文件没变就不再重试，避免每次扫描都卡同一个坏档
-                self.stats.n_cached += 1
-                self.stats.n_bad += 1
+                self._bump("n_cached")
+                self._bump("n_bad")
                 return
 
         if b.kind == "folder":
@@ -270,15 +342,15 @@ class ScanWorker:
             self._say(f"跳过（{b.path.name}）：{err}", "warn")
             self.cache.put_book(key, b.kind, b.fmt, b.size, b.mtime, n_img, 0, 0,
                                 s.crop_mode, thumb=thumb, status="error", error=err[:300])
-            self.stats.n_bad += 1
+            self._bump("n_bad")
             return
 
         if book_id is None:
             book_id = self.cache.put_book(key, b.kind, b.fmt, b.size, b.mtime, n_img,
                                           len(feats), blanks, s.crop_mode, thumb=thumb,
                                           status="empty" if not feats else "ok")
-        self.stats.n_scanned += 1
-        self.stats.n_pages += len(feats)
+        self._bump("n_scanned")
+        self._bump("n_pages", len(feats))
 
     # ---------------- 压缩包
     def _scan_archive(self, b: A.BookEntry):

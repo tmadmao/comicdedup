@@ -89,6 +89,13 @@ CREATE TABLE IF NOT EXISTS meta (
 class FeatureCache:
     """特征缓存。线程安全（内部一把锁串行化所有写操作）。"""
 
+    FLUSH_ROWS = 400
+    """页特征缓冲攒到这么多行就落盘一次。
+
+    多线程扫描时这个值还有第二层含义：进程若被强杀，**最多**只有这么多行（≈10 本）
+    的页特征还没提交，重跑时会被重算 —— 所以它同时也是「中断代价的上限」。
+    """
+
     def __init__(self, path: Optional[Path] = None):
         p = Path(path) if path else (data_dir() / DB_NAME)
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -175,15 +182,27 @@ class FeatureCache:
                     "blank,map16,tile) VALUES(?,?,?,?,?,?,?,?,?,?,?)", rows)
                 self.conn.commit()
             return
-        self._pending_pages.extend(rows)
-        if len(self._pending_pages) >= 400:
+        with self._lock:
+            self._pending_pages.extend(rows)
+            need = len(self._pending_pages) >= self.FLUSH_ROWS
+        if need:
             self.flush()
 
     def flush(self):
-        if not self._pending_pages:
-            return
-        rows, self._pending_pages = self._pending_pages, []
+        """把缓冲里的页特征落盘。
+
+        ⚠ 这四件事必须**整体**在同一把锁里完成：取缓冲、清缓冲、写库、提交。
+
+        原先是把 `rows, self._pending_pages = self._pending_pages, []` 写在锁外 ——
+        单线程完全没问题，但特征提取改成多线程跑之后，两个线程可能同时看到
+        「缓冲非空」并各自拿到**同一个 list**，于是同一批页被 executemany 插入两遍；
+        更糟的是可能拿到一个正在被别的线程 append 的列表。
+        （锁是可重入的 RLock，put_pages 里持锁调用本函数也安全。）
+        """
         with self._lock:
+            if not self._pending_pages:
+                return
+            rows, self._pending_pages = self._pending_pages, []
             self.conn.executemany(
                 "INSERT OR REPLACE INTO pages(book_id,idx,phash,bhash32,aspect,std,ink,px,"
                 "blank,map16,tile) VALUES(?,?,?,?,?,?,?,?,?,?,?)", rows)
