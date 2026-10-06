@@ -33,15 +33,53 @@ Windows 本地漫画查重桌面程序。**纯本地离线运行**，专门解�
 
 ## 二、快速开始
 
-### 方式 A：直接用 exe（推荐给不想装 Python 的人）
+### 方式 A：直接用打包版（推荐给不想装 Python 的人）
 
-1. 到 [Releases](https://github.com/tmadmao/comicdedup/releases) 下载 `ComicDedupTool.exe`
-2. 双击打开 → 选漫画根目录 → 开始扫描
+到 [Releases](https://github.com/tmadmao/comicdedup/releases) 下载
+`ComicDedupTool-v1.0.0-win64.zip`（105 MB，解开后约 259 MB）：
 
-> 还没发布 exe？双击 `打包exe.bat` 就能在本机自己打一个出来（需要先装 Python 依赖）。
-> 首次启动要把约 100MB 解压到临时目录，5~10 秒属正常。
+```
+解压 → 双击文件夹里的 ComicDedupTool.exe → 选漫画根目录 → 开始扫描
+```
+
+不用装 Python、不用装任何依赖，启动是瞬时的。
+
+> 想要**单文件 exe**（只有一个文件、更好管理）可以自己打：
+> `python -m PyInstaller --onefile --noconsole --noconfirm --name ComicDedupTool-onefile
+> --collect-submodules comicdedup --hidden-import PySide6 comic_dedup.py`
+> 代价是每次启动都要把约 260MB 解压到临时目录（等 5~10 秒），而且更容易被杀软误报（见下）。
+>
+> 不用下载也行：双击 `打包exe.bat` 能在本机自己打一个出来。
+
 > **7z / rar 的解压需要本机装有 [7-Zip](https://www.7-zip.org/) 或 WinRAR**（zip 不需要）。
 > 也可以把 `7z.exe` 直接放到 exe 同目录，程序会自动识别。
+
+#### ⚠️ 杀软误报（务必先看这条，尤其是装了 360 的）
+
+这是**未做代码签名**的自制工具，被国产杀软的启发式引擎误报是常见现象。本机实测遇到过一次：
+
+```
+360 安全卫士 · 主动防御
+  路径：...\dist\ComicDedupTool.exe
+  木马名称：HEUR/QVM202.0.8C7D.Malware.Gen      处置：已清除
+```
+
+判定名拆开看就很清楚：`HEUR` = 启发式、`QVM` = 360 的机器学习引擎、
+`.Malware.Gen` = **泛化特征**（"长得像"而非"匹配到某个已知木马"）—— 这是**误报**。
+
+为什么会误报：**单文件 exe 的运行方式是「把内置的一大包依赖解压到临时目录再执行」，
+这个行为与「释放载荷的木马」在特征上高度重合**，加上文件未签名、没有云信誉，
+很容易被扣分。实测换成**文件夹版**后，同样的代码、同样的功能就不再被拦。
+
+怎么办：
+
+1. 优先用上面的 **zip 文件夹版**（实测没被 360 拦过，启动也更快）；
+2. 被拦了就在 360 里加信任：`木马查杀 → 信任区 → 添加目录`，把解压出来的文件夹加进去；
+3. 被隔离/删除的文件可以在 360 隔离区**恢复**，恢复后加信任即可。
+
+要自己确认这个 exe 干不干净：源码就在本仓库（8 个模块、全中文注释，可以直接读），
+代码里**没有任何网络调用**（`--selftest` 有静态检查逐文件核验），
+也可以自己跑一遍 `打包exe.bat` 对比，或用 Release 页上的 SHA256 核对下载是否被篡改。
 
 ### 方式 B：源码运行
 
@@ -66,6 +104,20 @@ python comic_dedup.py --selftest                             :: 自检
 python comic_dedup.py --backends                             :: 看解压后端可用情况
 python comic_dedup.py --help
 ```
+
+装了打包版的话，把 `python comic_dedup.py` 换成 `ComicDedupTool.exe` 即可，参数完全一样：
+
+```bat
+cd /d D:\漫画查重\ComicDedupTool
+ComicDedupTool.exe --scan "D:\漫画" --csv 重复清单.csv
+```
+
+> 注意要在 **cmd 窗口里**执行（而不是双击）才能看到输出。
+> 打包版是「无控制台」程序：**双击**运行时系统不给它控制台，`--selftest` 这类
+> 带输出的子命令会"跑了但看不见"（实测从已有 cmd 窗口启动则输出正常可见）。
+
+输出重定向到文件时是 **UTF-8**（直接看控制台时跟随系统码页，中文 Windows 下是 GBK）——
+所以 `--scan ... > 清单.txt` 出来的文件用 VS Code 打开不会乱码。
 
 **界面库三选一即可**：`PyQt5`（首选）/ `PyQt6` / `PySide6`，装哪个都能跑。
 
@@ -278,6 +330,12 @@ UTF-8 带 BOM（Excel 直接双击不乱码）。
 | 界面回归（off-screen 无窗口） | `python tools/gui_smoketest.py` | **37 项全过**（渲染 / 筛选 / 勾选 / 详情 / 保留项 / CSV / 滑块 / 线程参数快照 / 删除安全） |
 | 真实语料端到端 | `python tools/make_testdata.py` 后 `--scan` | 见下 |
 
+> 打包成 exe 后再跑 `ComicDedupTool.exe --selftest`：**22 项通过 + 1 项 SKIP**，
+> 退出码 0。SKIP 的是「源码零网络调用」—— 那一项靠读 `.py` 文件做静态检查，
+> 而 exe 里只有字节码、没有源码，空跑必须显式标成 SKIP 而不是记成通过（假通过更危险）。
+> 同组的「删除函数里没有永久删除调用」在 exe 里仍然有效：读不到源码时
+> 会退化成扫字节码的名字表来做同样的判断。
+
 真实语料（21 项：zip / 7z / **rar** / 图片文件夹 / 损坏档 / 同系列分卷 / 无关样本）：
 
 ```
@@ -341,6 +399,9 @@ tools/
   gui_smoketest.py          界面回归（off-screen 无窗口）
   make_screenshots.py       生成 README 用的真实界面截图（离屏渲染 + 真实语料）
   make_flow_image.py        生成 README 用的核心算法流程图（PIL 绘制）
+  make_release_zip.py       把 onedir 打包产物压成发布用 zip
+  probe_console_attach.py   探测窗口版 exe 的控制台输出行为（打包验证用）
+  gh_release.py             发布到 GitHub Releases + 设置仓库简介与话题（走 REST API）
 docs/
   ui-main.png               README 主界面截图（程序真实渲染）
   ui-groups.png             重复组列表特写

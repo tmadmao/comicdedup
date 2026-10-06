@@ -2,7 +2,7 @@
 chcp 65001 >nul
 cd /d "%~dp0"
 echo ============================================================
-echo   打包免安装版 exe（PyInstaller）
+echo   打包免安装版（PyInstaller）
 echo ============================================================
 echo.
 
@@ -35,39 +35,41 @@ if errorlevel 1 (
   if errorlevel 1 goto FAIL
 )
 
-echo [4/5] 打包窗口版（双击用，不弹黑框），约 1-3 分钟...
-%PYCMD% -m PyInstaller --onefile --noconsole --noconfirm --clean ^
+echo [4/5] 打包「文件夹版」到 dist\ComicDedupTool\（推荐），约 1-3 分钟...
+%PYCMD% -m PyInstaller --onedir --noconsole --noconfirm --clean ^
   --name ComicDedupTool ^
   --collect-submodules comicdedup ^
   --hidden-import PySide6 ^
   --distpath dist --workpath build --specpath build comic_dedup.py
 if errorlevel 1 goto FAIL
 
-echo [5/5] 打包命令行版（--scan / --selftest 用），约 1-3 分钟...
-%PYCMD% -m PyInstaller --onefile --console --noconfirm --clean ^
-  --name ComicDedupTool-cli ^
-  --collect-submodules comicdedup ^
-  --hidden-import PySide6 ^
-  --distpath dist --workpath build --specpath build comic_dedup.py
+echo [5/5] 打成发布用 zip ...
+%PYCMD% tools\make_release_zip.py
 if errorlevel 1 goto FAIL
 
 echo.
 echo ============================================================
-echo   打包完成，产物在 dist\ 里：
-echo     dist\ComicDedupTool.exe       窗口版 —— 双击直接开图形界面
-echo     dist\ComicDedupTool-cli.exe   命令行版 —— 有控制台输出
+echo   打包完成，dist\ 里有两样东西：
+echo     dist\ComicDedupTool\                  文件夹版（推荐）
+echo     dist\ComicDedupTool-v1.0.0-win64.zip  上面这个的压缩包
 echo.
-echo   为什么是两个 exe：
-echo     窗口版是 GUI 子系统程序，Windows 不给它控制台，
-echo     所以它的 --scan / --selftest 是「跑了但什么都看不见」。
-echo     要看命令行输出、或者写批处理调用，请用 -cli 那个。
+echo   为什么默认发文件夹版而不是单文件 exe：
+echo     1) 单文件每次启动都要把 ~260MB 依赖解压到临时目录，双击后要等 5~10 秒；
+echo        文件夹版是解压好的，启动是瞬时的。
+echo     2) 单文件的自解压行为容易被杀软启发式误判成木马
+echo        （实测 360 报过一次 HEUR/QVM202.0.8C7D.Malware.Gen，属误报）。
+echo.
+echo   想要单文件 exe 的话，再跑一次：
+echo     %PYCMD% -m PyInstaller --onefile --noconsole --noconfirm --clean ^
+echo       --name ComicDedupTool-onefile --collect-submodules comicdedup ^
+echo       --hidden-import PySide6 --distpath dist --workpath build --specpath build comic_dedup.py
 echo.
 echo   其它说明：
-echo     - exe 可自由改名，比如改成「漫画查重.exe」
-echo     - 若杀软误报或启动太慢，改用文件夹模式：
-echo       把脚本里的 --onefile 删掉，再运行一次
+echo     - exe / 文件夹都可以自由改名，比如改成「漫画查重」
 echo     - 7z / rar 的解压仍需本机装有 7-Zip 或 WinRAR（zip 不需要）
 echo       也可以把 7z.exe 放到 exe 同目录，程序会自动识别
+echo     - 无控制台打包，双击运行时看不到命令行输出是正常的；
+echo       想看 --selftest / --scan 的输出，在 cmd 里 cd 到该目录再执行 exe 即可
 echo ============================================================
 pause
 exit /b 0

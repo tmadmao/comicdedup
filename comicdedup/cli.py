@@ -4,8 +4,8 @@
 
 * 控制台输出一律用 **ASCII 符号**（OK/FAIL/*/!），不用 ✓✗★⚠ ——
   GBK 码页编不出这些字符，重定向到文件时会直接崩。
-* 只调整 ``sys.stdout`` 的 **errors**，不改 encoding —— 改成 utf-8 反而会让
-  GBK 控制台下的中文变乱码。
+* 输出的**编码按目的地自适应**（见 `setup_console`）：控制台保持系统码页、
+  重定向到文件或管道时用 UTF-8。
 * ``--noconsole`` 打包后 ``sys.stdout`` 是 ``None``，所有输出走安全 ``say()``。
 """
 
@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import io
 import logging
+import re
 import sys
 import time
 from pathlib import Path
@@ -41,17 +42,82 @@ class _NullWriter:
         return False
 
 
+def _console_cp() -> int:
+    """当前控制台的输出代码页（拿不到返回 0）。"""
+    try:
+        import ctypes
+        return int(ctypes.windll.kernel32.GetConsoleOutputCP() or 0)
+    except Exception:
+        return 0
+
+
 def setup_console():
-    """控制台编码兜底。"""
+    """控制台编码兜底。规则如下，目标是「中文在任何终端下都能看」：
+
+    1. ``--noconsole`` 打包后 ``sys.stdout`` 是 ``None`` → 换成空写入器，
+       否则 ``say()`` 一调用就抛异常。
+    2. **输出到控制台**：保持系统给的那套编码（中文 Windows 默认 GBK），
+       cmd / PowerShell 里就能正常显示中文。只有控制台本身已经是 UTF-8
+       码页（65001，比如 Windows Terminal 开了「使用 UTF-8」）时才用 UTF-8。
+    3. **输出被重定向**（``> 文件`` 或管道）：一律 UTF-8。GBK 文件被
+       VS Code / Git Bash / Python 默认读法一读就是乱码，UTF-8 才是现在
+       通用的做法；打包后的 exe 尤其需要这一条（用户很容易把 --scan 的结果
+       重定向成清单文件）。
+
+    ⚠ 不要简单粗暴地「一律改成 UTF-8」：在 chcp 936 的老 cmd 里，
+    UTF-8 字节会显示成一片乱码。
+    """
     if sys.stdout is None:
         sys.stdout = _NullWriter()
     if sys.stderr is None:
         sys.stderr = _NullWriter()
+
+    is_console = False
+    try:
+        is_console = bool(sys.stdout.isatty())
+    except Exception:
+        pass
+    want = "utf-8" if (not is_console or _console_cp() == 65001) else None
+
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(errors="replace")
+            if want:
+                stream.reconfigure(encoding=want, errors="replace")
+            else:
+                stream.reconfigure(errors="replace")
         except Exception:
             pass
+
+
+def _code_haystack(fn) -> str:
+    """取出一个函数「代码里出现过的标识符」，供静态检查使用。
+
+    打包成 exe 之后磁盘上没有 ``.py``（PyInstaller 只留字节码），
+    ``inspect.getsource`` 会抛 ``OSError: could not get source code``。
+    这时退化成扫字节码里的名字表与常量 —— 对「有没有调用某个危险函数」
+    「参数里有没有 max_items」这类检查来说，效果与读源码一样。
+    """
+    try:
+        import inspect
+        return inspect.getsource(fn)
+    except Exception:
+        pass
+    parts: list = []
+    seen: set = set()
+    stack = [getattr(fn, "__code__", None)]
+    while stack:
+        co = stack.pop()
+        if co is None or id(co) in seen:
+            continue
+        seen.add(id(co))
+        for attr in ("co_names", "co_varnames", "co_freevars", "co_cellvars"):
+            parts.extend(getattr(co, attr, ()) or ())
+        for c in getattr(co, "co_consts", ()) or ():
+            if hasattr(c, "co_code"):
+                stack.append(c)
+            elif isinstance(c, str):
+                parts.append(c)
+    return "\n".join(parts)
 
 
 def say(msg: str = ""):
@@ -147,7 +213,7 @@ def cmd_scan(a) -> int:
 
 def cmd_selftest(a) -> int:
     t0 = time.time()
-    ok_n, bad_n = 0, 0
+    ok_n, bad_n, skip_n = 0, 0, 0
 
     def chk(cond, name, extra=""):
         nonlocal ok_n, bad_n
@@ -158,6 +224,16 @@ def cmd_selftest(a) -> int:
             bad_n += 1
             say(f"  [FAIL] {name}   {extra}")
         return cond
+
+    def note(name, extra=""):
+        """既不算通过也不算失败：该项在当前运行形态下**没法真正执行**。
+
+        打包成 exe 后源码不在磁盘上，靠读源码做的静态检查就是空跑 ——
+        空跑必须显式标成 SKIP，不能记成 OK（那等于假通过）。
+        """
+        nonlocal skip_n
+        skip_n += 1
+        say(f"  [SKIP] {name}" + (f"   {extra}" if extra else ""))
 
     say(f"== {APP_NAME} v{__version__} 自检 ==")
     say("\n[1] 运行环境")
@@ -222,28 +298,37 @@ def cmd_selftest(a) -> int:
     chk(max(idx) < 180, "不越界")
 
     say("\n[5] 安全与隐私")
-    import inspect
     from . import engine as E
     src = Path(__file__).resolve().parent
-    # 注意：这里刻意把关键字拆开拼接，否则「检查代码本身」会被自己匹配到
-    net_words = ("import " + "requests", "import " + "socket",
-                 "import " + "urllib.request", "import " + "http.client",
-                 "url" + "open(", "socket." + "socket", "import " + "aiohttp",
-                 "import " + "ftplib", "import " + "telnetlib")
-    hits = []
-    for py in sorted(src.glob("*.py")):
-        if py.name == Path(__file__).name:      # 跳过本文件（检查器自身）
-            continue
-        txt = py.read_text(encoding="utf-8")
-        for w in net_words:
-            if w in txt:
-                hits.append(f"{py.name}:{w}")
-    chk(not hits, "源码零网络调用（纯本地，不上传）", "、".join(hits) if hits else "")
-    delsrc = inspect.getsource(E.delete_paths)
-    chk("rmtree" not in delsrc and "os.remove" not in delsrc and "unlink(" not in delsrc,
-        "删除函数里没有永久删除调用")
-    chk("send2trash" in delsrc, "优先使用系统回收站")
-    chk("max_items" in delsrc, "有单次数量上限")
+    pys = [p for p in sorted(src.glob("*.py")) if p.name != Path(__file__).name]
+    if not pys:
+        note("源码零网络调用（打包版不含 .py 源码，本项跳过）")
+    else:
+        # 注意：这里刻意把关键字拆开拼接，否则「检查代码本身」会被自己匹配到
+        net_words = ("import " + "requests", "import " + "socket",
+                     "import " + "urllib.request", "import " + "http.client",
+                     "url" + "open(", "socket." + "socket", "import " + "aiohttp",
+                     "import " + "ftplib", "import " + "telnetlib")
+        hits = []
+        for py in pys:
+            txt = py.read_text(encoding="utf-8")
+            for w in net_words:
+                if w in txt:
+                    hits.append(f"{py.name}:{w}")
+        chk(not hits, "源码零网络调用（纯本地，不上传）",
+            "、".join(hits) if hits else f"逐文件核验 {len(pys)} 个模块")
+
+    # 删除函数的安全约束。读源码在打包版里不可用，_code_haystack 会自动退化成
+    # 扫字节码的名字表，所以这一组检查在源码运行与 exe 里都成立。
+    delhay = _code_haystack(E.delete_paths)
+    bad_calls = [w for w in ("rmtree", "removedirs", "unlink")
+                 if re.search(rf"\b{w}\b", delhay)]
+    if re.search(r"\bremove\b", delhay):
+        bad_calls.append("os.remove")
+    chk(not bad_calls, "删除函数里没有永久删除调用",
+        "、".join(bad_calls) if bad_calls else "")
+    chk("send2trash" in delhay, "优先使用系统回收站")
+    chk("max_items" in delhay, "有单次数量上限")
 
     say("\n[6] 缓存数据库")
     try:
@@ -273,7 +358,9 @@ def cmd_selftest(a) -> int:
     _selftest_separation(chk)
 
     say("")
-    say(f"== 自检结束：通过 {ok_n} 项，失败 {bad_n} 项，耗时 {time.time()-t0:.1f} 秒 ==")
+    tail = f"，跳过 {skip_n} 项（打包版不含源码）" if skip_n else ""
+    say(f"== 自检结束：通过 {ok_n} 项，失败 {bad_n} 项{tail}，"
+        f"耗时 {time.time()-t0:.1f} 秒 ==")
     return 1 if bad_n else 0
 
 
