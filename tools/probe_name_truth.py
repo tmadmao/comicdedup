@@ -71,8 +71,11 @@ def main() -> int:
     args = ap.parse_args()
 
     import sqlite3
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from comicdedup.core import FEAT_VER
     con = sqlite3.connect(f"file:{Path(args.db).as_posix()}?mode=ro", uri=True)
-    books = [r[0] for r in con.execute("SELECT path FROM books WHERE status='ok'")]
+    books = [r[0] for r in con.execute(
+        "SELECT path FROM books WHERE status='ok' AND feat_ver=?", (FEAT_VER,))]
 
     key_of: dict = {}
     members: dict = defaultdict(list)
