@@ -66,7 +66,7 @@ echo       --hidden-import PySide6 --distpath dist --workpath build --specpath b
 echo.
 echo   其它说明：
 echo     - exe / 文件夹都可以自由改名，比如改成「漫画查重」
-echo     - 7z / rar 的解压仍需本机装有 7-Zip 或 WinRAR（zip 不需要）
+echo     - 7z / rar 的解压仍需装有 7-Zip 或 WinRAR（zip 不需要）
 echo       也可以把 7z.exe 放到 exe 同目录，程序会自动识别
 echo     - 无控制台打包，双击运行时看不到命令行输出是正常的；
 echo       想看 --selftest / --scan 的输出，在 cmd 里 cd 到该目录再执行 exe 即可

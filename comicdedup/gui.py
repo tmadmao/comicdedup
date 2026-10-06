@@ -152,7 +152,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._make_actions()
         self.statusBar().showMessage(
-            f"就绪 · Qt 绑定：{QT_BINDING} · 全部处理都在本机完成，不联网、不上传")
+            f"就绪 · Qt 绑定：{QT_BINDING} · 全部处理都在本地完成，不联网、不上传")
 
     # ---- 顶部
     def _build_top(self):
@@ -494,7 +494,8 @@ class MainWindow(QtWidgets.QMainWindow):
         import os
         v = int(self.cb_jobs.currentData() or 0)
         n = v if v > 0 else max(2, min(8, os.cpu_count() or 4))
-        self.lb_jobs.setText(f"本机 {os.cpu_count()} 个逻辑核，本次实际用 {n} 个线程")
+        self.lb_jobs.setText(
+            f"本次使用 {n} 个线程" if v > 0 else f"自动：本次使用 {n} 个线程")
 
     def _settings(self) -> ScanSettings:
         a, w, m = PRESETS.get(self.cb_preset.currentText(), PRESETS["标准"])

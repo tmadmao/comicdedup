@@ -42,7 +42,7 @@ def data_dir() -> Path:
     * 便携模式：程序目录下存在 `portable.txt` 时，数据放在 `程序目录\\data`；
     * 默认模式：`%LOCALAPPDATA%\\ComicDedup`。
 
-    均可被环境变量 `COMICDEDUP_DATA_DIR` 覆盖。所有数据都在本机，不联网。
+    均可被环境变量 `COMICDEDUP_DATA_DIR` 覆盖。所有数据都在本地，不联网。
     """
     env = os.environ.get("COMICDEDUP_DATA_DIR")
     if env:

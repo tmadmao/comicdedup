@@ -4,7 +4,7 @@
 --------
 * **绝不落地解压**：所有图片都在内存里解码。压缩包内容不进临时目录、不写磁盘。
 * **后端链 + 优雅降级**：能用 Python 原生/纯 Python 库就用库（快、无外部依赖），
-  否则自动找本机的解压程序（7-Zip / WinRAR / Windows 自带的 bsdtar/libarchive），
+  否则自动找系统里的解压程序（7-Zip / WinRAR / Windows 自带的 bsdtar/libarchive），
   全都找不到就记日志跳过这本，程序继续跑。
 * **按扩展名不可靠**：有些 .zip 其实是 rar（或反之），所以读**文件头魔数**判断真实格式。
 * **一次进程调用读完一本**：外部解压程序每个只调一次（把要抽的页一次抽完再按大小切开），
@@ -185,7 +185,7 @@ _TOOLS: dict = {}
 
 
 def available_backends() -> dict:
-    """探测本机可用的后端（结果缓存）。"""
+    """探测系统里可用的后端（结果缓存）。"""
     if _TOOLS:
         return _TOOLS
     _TOOLS["sevenzip"] = find_tool(["7z", "7za", "7zz"])
