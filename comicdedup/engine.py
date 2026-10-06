@@ -23,6 +23,8 @@ import shutil
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from bisect import bisect_left
+from collections import deque
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Sequence
@@ -41,16 +43,19 @@ log = logging.getLogger("comicdedup")
 
 
 PRESETS = {
-    # 名称: (锚点数, 窗口半宽, 每本最多抽多少页)
-    "快速": (6, 0, 8),
-    "标准": (8, 2, 40),
-    "彻底": (14, 3, 100),
+    # 名称: (采样块数, 每块半宽, 每本最多抽多少页)
+    #
+    # ⚠ 采样方式在 v1.1 改过：从「8 个锚点各 ±2 页」改成「4 个块各 13 页」。
+    # 原因见 sample_indices 的说明 —— 块越长，越能容忍两个版本之间**页数不一样**。
+    "快速": (3, 3, 21),
+    "标准": (4, 6, 52),
+    "彻底": (6, 8, 102),
     "全页": (0, 0, 0),          # 0 = 所有页
 }
 PRESET_HELP = {
-    "快速": "每本抽 8 页左右。适合先跑一遍找「同源改名/换格式」这类重复，最快。",
-    "标准": "每本抽 40 页以内（8 个锚点各向两侧扩 2 页）。能覆盖「扫描版 vs 官方DL版」，推荐。",
-    "彻底": "每本抽 100 页以内。两版页数差得多时更稳，但耗时长。",
+    "快速": "每本抽 20 页左右（3 个块）。只适合先跑一遍找「同源改名/换格式」这类重复。",
+    "标准": "每本抽 52 页以内（4 个块，每块 13 页）。能覆盖「扫描版 vs 官方DL版」，推荐。",
+    "彻底": "每本抽 102 页以内（6 个块，每块 17 页）。两版页数差得多时更稳，但耗时长。",
     "全页": "每一页都算。最准最慢（3000 本 × 180 页 ≈ 54 万页，首次可能要好几个小时）。",
 }
 
@@ -58,11 +63,13 @@ PRESET_HELP = {
 @dataclass
 class ScanSettings:
     root: Path = Path(".")
-    # --- 采样
+    # --- 采样（默认值与「标准」预设一致：4 块 × 每块 13 页、上限 52。
+    #     语义见 sample_indices —— anchors 是**块数**、window 是**块半径**。
+    #     绕过 from_preset 直接构造时也必须拿到块采样，不能是旧稀疏锚点。）
     preset: str = "标准"
-    anchors: int = 8
-    window: int = 2
-    max_pages: int = 40
+    anchors: int = 4
+    window: int = 6
+    max_pages: int = 52
     # --- 预处理
     crop_mode: str = core.DEFAULT_CROP
     do_deskew: bool = True
@@ -71,10 +78,12 @@ class ScanSettings:
     make_thumbs: bool = True
     # --- 判重
     page_thr: float = 0.62       # 页级相似度阈值
-    min_pages: int = 3           # 至少多少页匹配才算同一本
-    ratio_thr: float = 0.25      # 命中率下限（防同系列连环并组）
-    coarse_thr: float = 0.55     # 粗筛阈值
-    pre_min: int = 2             # 预筛：至少多少页对相似才进入精比
+    min_pages: int = 3           # 至少多少页成链才算同一本
+    ratio_thr: float = 0.25      # 成链页数 / 较短那本的抽样页数（防同系列连环并组）
+    in_order: float = 0.6        # 成链页数 / 命中页数下限（拦页序乱跳的噪声）
+    coarse_thr: float = 0.70     # 候选预筛阈值（作用在 16x16 粗筛图上，见 GroupSettings）
+    pre_min: int = 5             # 预筛：命中页数 + 成链页数都要达到这个数才进精比
+    pre_ratio: float = 0.2       # 页数少的书的预筛兜底比例
     # --- 其它
     max_books: int = 0           # 0 = 不限（调试用）
     threads: int = 0             # 工作线程数：0 = 自动（min(8, CPU 逻辑核数)）
@@ -102,26 +111,41 @@ class ScanStats:
 def sample_indices(page_count: int, anchors: int, window: int, max_pages: int) -> list:
     """决定每本抽哪几页。
 
-    策略：在整本书上均匀取 ``anchors`` 个锚点，每个锚点向两侧各扩 ``window`` 页。
-    加窗口是为了容忍「两个版本页数不同」造成的对应页偏移 —— 两个版本各自按
-    相对位置采到的页会差几页，靠窗口把对方真正的那一页也纳入进来，
-    再由「整本多页集合匹配」在比对阶段把真正对应的页找出来。
+    策略：在整本书上均匀放 ``anchors`` 个**块**，每块连续取 ``2*window+1`` 页。
+    第 0 页（封面）不抽 —— 需求明确要求不要只比封面，而且封面往往是后配的。
 
-    ``anchors=0`` 表示每一页都抽。跳过封面（第 0 页）—— 需求明确要求不要只比封面，
-    而且第 0 页往往是别人的扫描封面，两版差异最大。
+    **为什么是「块」而不是「稀疏锚点」（v1.1 的关键改动）**
+
+    两个版本之间只要页数不一样，对应页的**绝对页号**就会越差越远：页数差 ΔP 时，
+    全书 85% 处的对应页偏移 ≈ 0.85·ΔP。稀疏采样（每处只抽 1 页）要靠「窗口」去
+    兜这个偏移，窗口一超就整块落空。
+
+    实测（3067 本真实单行本）：旧方案（8 锚点 × ±2 页）在 ΔP ≈ 12 页时，
+    8 个块里只有前 2~3 个能对上，一本 242 页的书只配出 4 页 → 判重失败。
+    而统计工具**已判重**的 266 对书，页数差中位数仅 0.5%、94% 都在 5% 以内 ——
+    说明旧方案的召回天花板就是「两版页数差 ≈ 2%」。
+
+    块越长，能容忍的偏移越大（块长 13 页 ≈ 容忍 13 页偏移）。在同样的页数预算下，
+    「少而长」的块远胜「多而短」的锚点：ΔP=12、总预算 52 页时，
+    块长 13（4 块）能配上约 28 页，块长 5（10 块）只能配上 2~6 页。
+
+    块中心均匀落在 (0,1) 开区间内，避免把块贴到书的最前/最后一页 ——
+    因为「另一版多出来的页」通常就堆在书的头尾两端。
     """
     if page_count <= 0:
         return []
     if page_count <= 3:
-        return list(range(page_count))
+        # 超短书：能抽的内页全抽（与主路径一致，第 0 页封面不抽；
+        # 单页书没得选，只能抽它）
+        return list(range(1, page_count)) or [0]
     if anchors <= 0:
         return list(range(page_count))
     body = page_count - 1
-    idxs = set()
     if anchors == 1:
         centers = [1 + body // 2]
     else:
-        centers = [1 + int(round(k * (body - 1) / (anchors - 1))) for k in range(anchors)]
+        centers = [1 + int(round((k + 0.5) * body / anchors)) for k in range(anchors)]
+    idxs = set()
     for c in centers:
         for d in range(-window, window + 1):
             j = c + d
@@ -129,9 +153,9 @@ def sample_indices(page_count: int, anchors: int, window: int, max_pages: int) -
                 idxs.add(j)
     out = sorted(idxs)
     if max_pages and len(out) > max_pages:
+        # 超预算就均匀抽稀（块会变短，容忍偏移的能力下降，但至少覆盖得住全书）
         step = len(out) / float(max_pages)
-        out = [out[min(len(out) - 1, int(i * step))] for i in range(max_pages)]
-        out = sorted(set(out))
+        out = sorted({out[min(len(out) - 1, int(i * step))] for i in range(max_pages)})
     return out
 
 
@@ -536,9 +560,10 @@ class Member:
     thumb: str = ""
     keep: bool = False
     score: float = 0.0
-    matched: int = 0
-    ratio: float = 0.0
-    pairs: list = field(default_factory=list)   # [(idx_a, idx_b, 分, 对齐分)]
+    matched: int = 0          # 成链页数（页序对得上的页数）
+    ratio: float = 0.0        # 成链页数 / 较短那本的抽样页数
+    pairs: list = field(default_factory=list)   # [(idx_a, idx_b, 分)]
+    relation: str = ""        # 关系标签：完全相同 / 页码对齐·两版页数不同 / 有页码偏移 / 有页码偏移·两版页数不同
 
 
 @dataclass
@@ -639,18 +664,25 @@ def compute_matches(A_tiles: np.ndarray, B_tiles: np.ndarray,
     """页对分数矩阵（平移精比 + pHash 融合）。
 
     A_tiles (m,64,64) / B_tiles (n,64,64) uint8；返回 (m,n) float32。
+
+    性能：pHash 融合用**向量化的 popcount**（``core.popcount64``）一次算完整张
+    汉明距离表，而不是逐页调用 Python 的 ``bin().count()``；图块先整体转 float32，
+    避免 ``aligned_similarity`` 在热路径上重复 astype。
     """
     m, n = A_tiles.shape[0], B_tiles.shape[0]
     if m == 0 or n == 0:
         return np.zeros((m, n), dtype=np.float32)
     out = np.zeros((m, n), dtype=np.float32)
-    hi = max(page_thr + 0.15, 0.5)   # 先算对齐分，融合后可能被 pHash 抬高
+    A = A_tiles.astype(np.float32)
+    B = B_tiles.astype(np.float32)
+    # 预计算 pHash 汉明距离表（向量化）
+    x = np.bitwise_xor(A_ph[:, None], B_ph[None, :])
+    ham = core.popcount64(x.astype(np.uint64)).astype(np.float32)
     for i in range(m):
         for j in range(n):
-            al = core.aligned_similarity(A_tiles[i], B_tiles[j])
+            al = core.aligned_similarity(A[i], B[j])
             if al > 0.05:
-                d = core.phash_hamming(int(A_ph[i]), int(B_ph[j]))
-                out[i, j] = core.fused_page_score(al, core.sim_from_hamming(d, 32))
+                out[i, j] = core.fused_page_score(al, core.sim_from_hamming(float(ham[i, j]), 32))
             else:
                 out[i, j] = 0.0
     return out
@@ -676,42 +708,115 @@ def _greedy_match(M: np.ndarray, thr: float) -> list:
     return res
 
 
-def _order_consistent(ms: list, idx_a: Sequence[int], idx_b: Sequence[int],
-                      allow_viol: float = 0.25) -> bool:
-    """检查匹配页对在**页序**上是否自洽。
+def _lis_chain(ms: Sequence) -> int:
+    """匹配页对里**最长递增链**的长度（页序一致性判据）。
 
-    同一本书的两个版本，页序必然一致（漫画不可能乱页）。于是：
+    把匹配对按 A 的页序排好，对 B 的页序求最长严格递增子序列。
+    同一本书的两个版本页序必然一致，所以真重复的匹配对会连成一条斜线
+    （链长 ≈ 匹配页数）；而「版式雷同凑出来的假匹配」页码乱跳，链长很小。
 
-    * 把匹配对按 A 的页序排好后，B 的页序也应当基本单调递增；
-    * 两版之间差的封面/插页会体现为一个**高度集中的常数偏移**（A页序 − B页序）。
-
-    而「只是因为分镜版式雷同」凑出来的假匹配，页序是乱跳的 —— 这一步专门挡它。
-    这正是扫描漫画指纹论文里「cut 序列」思路的推广：用页与页的**顺序关系**做判据，
-    而不是只看单页像不像。
+    为什么不用「偏移量的 90 分位」那套（旧实现，已废弃）：
+    匹配对数常常只有十几个，90 分位落在倒数第二个点上，**两个离群点就能把整对否掉**。
+    实测 `某本书` 的两个版本有 11 页相似度 1.00（完全相同的图），
+    只因多出来的两页造成两个离群偏移，就被旧判据判成「页序不自洽」而漏掉。
+    LIS 天然容忍少数离群，只统计「成链」的部分。
     """
-    if len(ms) < 3:
-        return False
-    pairs = sorted((int(idx_a[i]), int(idx_b[j])) for (i, j, _s) in ms)
-    bs = [b for _a, b in pairs]
-    span = max(1, max(len(idx_a), len(idx_b)))
-    tol = max(2, int(0.03 * span))
-    viol = sum(1 for k in range(1, len(bs)) if bs[k] < bs[k - 1] - tol)
-    if viol > allow_viol * (len(bs) - 1):
-        return False
-    offs = np.array([a - b for a, b in pairs], dtype=np.float32)
-    med = float(np.median(offs))
-    spread = float(np.percentile(np.abs(offs - med), 90))
-    return spread <= max(8.0, 0.15 * span)
+    if not ms:
+        return 0
+    ps = sorted((int(i), int(j)) for (i, j, _s) in ms)
+    tails: list = []
+    for _i, j in ps:
+        k = bisect_left(tails, j)
+        if k == len(tails):
+            tails.append(j)
+        else:
+            tails[k] = j
+    return len(tails)
+
+
+def _relation(ms: Sequence, iax: Sequence[int], ibx: Sequence[int],
+              pages_a: int, pages_b: int) -> str:
+    """给一对重复书打一个人类可读的关系标签（思路来自 ComicDup 的「结果分类」）。
+
+    标签按**机制**命名（v1.1.1）：旧版「页序相同 vs 页序一致」从字面无法分辨，
+    实际区别是「匹配对的页号零偏移（同一物理版式）」vs「页号整体错开
+    （一版多了广告页/版权页，顺序仍一致）」。
+
+    注意：这是在**抽样页**上判的，给不出「具体缺哪几页」——那需要对两本做
+    全量逐页比对（ComicDup 的按需全量比对），留待后续版本。
+    """
+    if not ms:
+        return ""
+    zero_off = all(int(iax[i]) == int(ibx[j]) for (i, j, _s) in ms)
+    if zero_off and pages_a == pages_b:
+        return "完全相同"
+    if zero_off:
+        return "页码对齐·两版页数不同"
+    if pages_a == pages_b:
+        return "有页码偏移"
+    return "有页码偏移·两版页数不同"
 
 
 @dataclass
 class GroupSettings:
     page_thr: float = 0.62
+    """页级相似度阈值（作用在 64×64 页图块的平移不变精比上）。"""
     min_pages: int = 3
+    """至少有多少页**成链**（页序对得上）才算同一本。"""
     ratio_thr: float = 0.25
-    coarse_thr: float = 0.55
-    pre_min: int = 2
+    """成链页数 / 较短那本的抽样页数。"""
+    in_order: float = 0.6
+    """成链页数 / 命中页数 —— 一对一匹配里至少这个比例要落在链上。
+
+    只靠「命中多少页」不够：两版各自按块采样时，块内会有小幅乱序配对
+    （A33↔B35、A34↔B33 …），还夹杂少量完全错位的离群点。真正的重复绝大多数
+    匹配都在链上（实测真重复这个比值 ≥ 0.85），靠它把纯噪声对挤出去。
+    """
+    coarse_thr: float = 0.70
+    """候选预筛的页级阈值（作用在 16×16 粗筛图上）。
+
+    为什么是 0.70：实测 3067 本真实单行本，随机两页的 16×16 余弦有 4.4% 能过 0.55，
+    一本 35 页的书就是几十个假命中；提到 0.70 后随机误入降到 0.5%，
+    而真正对应的页对（含最难的"扫描版 vs 官方 DL 版"）仍能配上好几页。
+    """
+    pre_min: int = 5
+    """预筛：两本书的匹配对里，命中页数**和**成链页数都要达标（绝对值或比例）才送进精比。
+
+    双门槛（命中数 + LIS）是实测校准出来的：粗筛分数 0.70 下，只查「一对一命中 ≥5」
+    会放进 1083 对，其中夹杂大量「共享版权页/广告页」的噪声；同时查「命中 ≥5 且
+    成链 ≥5」只剩 701 对，几乎全是真重复。LIS 负责把页码乱跳的公共页挡在精比外。
+    """
+    pre_ratio: float = 0.2
+    """预筛的比例兜底：命中数 / 成链数不足 ``pre_min`` 时，占较短那本书抽样页数的
+    比例 ≥ 本值也送进精比（照顾只有十几页的短篇）。**绝对 OR 比例**，不是「且」。"""
+    chain_floor: int = 8
+    """精比比例门槛之外的**绝对链长地板**：成链页数 ≥ 此值即视为比例达标（0=关闭）。
+
+    为什么需要：ratio = 成链页数 / 较短那本抽样页数。标准档每本抽 52 页时，
+    ratio ≥ 0.25 隐式要求成链 ≥ 13 —— 比 LIS 分档表（真实库 1219 候选实测）给出的
+    强分界 **LIS≥8** 还严，会把 8~12 档的真重复（实测真率 41.7%）整批切掉。
+    LIS 本身就是强判别器（真重复 LIS 中位 28、噪声对中位 0），链长足够时
+    不应再受比例门槛二次挤压。
+    """
     threads: int = 0
+
+
+def _page_desc(maps: np.ndarray) -> np.ndarray:
+    """把每页的 16×16 粗筛图变成去均值单位向量（float32）。
+
+    **为什么仍然用 16×16（而不是更锐的 32×32 / 64×64）**：这一步是为了**召回**，
+    不是判别。实测最难的那一类（自制扫描版 vs 官方 DL 版）在 16×16 上仍能一一配上
+    5~6 页，换成 32×32 只剩 1~2 页 —— 更锐的描述子对两版之间的**残余位移/缩放差**
+    更敏感，反而把真重复漏掉。判别力不靠描述子，靠下一步的「一对一匹配页数」。
+
+    顺带：``map16`` 是页特征里现成的 256 字节，不用解压 64×64 图块，省一次全库解压。
+    """
+    P = np.asarray(maps, dtype=np.float32)
+    P = P - P.mean(axis=1, keepdims=True)
+    nrm = np.sqrt((P * P).sum(axis=1, keepdims=True))
+    nrm[nrm < 1e-3] = np.inf
+    P /= nrm
+    return P
 
 
 def group_books(cache: FeatureCache, settings: GroupSettings,
@@ -729,25 +834,26 @@ def group_books(cache: FeatureCache, settings: GroupSettings,
     for r in rows:
         px_by_book.setdefault(int(r["bid"]), []).append(int(r["px"] or 0))
 
-    # ---- 按书分组，构造粗筛矩阵
+    # ---- 按书分组
     bids = np.array([r["bid"] for r in rows], dtype=np.int64)
     order = np.argsort(bids, kind="stable")
     bids = bids[order]
     maps = np.stack([np.frombuffer(rows[i]["map16"], dtype=np.uint8) for i in order])
-    phs = np.array([int(rows[i]["phash"]) for i in order], dtype=np.uint64)
-    bhs = np.array([int(rows[i]["bhash32"]) for i in order], dtype=np.uint32)
     uniq, starts, counts = np.unique(bids, return_index=True, return_counts=True)
     nb = len(uniq)
     log.info("分组：%d 本书 / %d 页", nb, len(bids))
 
-    # 归一化的粗筛向量（一次算好，后面重复使用）
-    P = maps.astype(np.float32)
-    P -= P.mean(axis=1, keepdims=True)
-    nrm = np.sqrt((P * P).sum(axis=1, keepdims=True))
-    nrm[nrm < 1e-3] = np.inf
-    P /= nrm
+    # ---- 页描述子（16x16 去均值单位向量）
+    P = _page_desc(maps)
 
-    # ---- 候选书对：逐书做一次矩阵乘法，按书汇总命中数
+    # ---- 候选书对：逐书矩阵乘法 + 一对一匹配 + **成链页数（LIS）**
+    # 判据分两步：① 一对一贪心匹配得到「哪些页对最像」；② 看这些匹配对能连成
+    # 多长的递增链（页序一致）。漫画整套书里版权页/广告页/预告页反复出现，
+    # 两本不相干的书也会共享 2~4 页完全一样的图 —— 但那些匹配对页码乱跳、
+    # 连不成链；只有「同一本书的两个版本」才会连成一条斜线。
+    # 实测（3067 本真实单行本）：旧的「一对一命中页数」筛出 1219 对候选、
+    # 精比准确率仅 21.7%；换成「成链页数」后，把真正的重复几乎全圈进来了，
+    # 候选总量还更小，省下的时间花在精比上。
     cand: set = set()
     done = 0
     for k in range(nb):
@@ -758,16 +864,30 @@ def group_books(cache: FeatureCache, settings: GroupSettings,
         if c0 >= len(bids):
             continue
         S = P[a0:a1] @ P[c0:].T                      # (m, 后面的全部页)
-        hit = S >= settings.coarse_thr
-        # 按书汇总：用 reduceat 在列方向分段求和，得到「这本书与每本后续书之间有多少个相似页对」。
-        # ⚠ 判据是**页对总数**，不是「同一页命中对方多页」——
-        # 同书两版是一一对应的，每个页在对方书里通常只命中 1 页（实测踩过这个坑）。
         seg_start = starts[k + 1:] - c0
         seg_len = counts[k + 1:]
-        cnt = np.add.reduceat(hit.astype(np.int32), seg_start, axis=1)
-        cnt = cnt[:, : len(seg_len)]
-        totals = cnt.sum(axis=0)
-        for t in np.nonzero(totals >= settings.pre_min)[0]:
+        spans = np.minimum(counts[k], seg_len)       # 每个候选书对里，抽样页数较少的那本
+        # 先粗过一遍：raw 命中页对数（一对一匹配只会更少）连「绝对 / 比例」门槛的
+        # 低者都不到的书对，直接跳过，省掉一对一匹配的功夫
+        rough = np.add.reduceat((S >= settings.coarse_thr).sum(axis=0), seg_start)[: len(seg_len)]
+        for t in np.nonzero((rough >= settings.pre_min) |
+                            (rough >= settings.pre_ratio * spans))[0]:
+            j0 = int(seg_start[t])
+            j1 = j0 + int(seg_len[t])
+            span = int(spans[t])
+            ms = _greedy_match(S[:, j0:j1], settings.coarse_thr)
+            n_match = len(ms)
+            chain = _lis_chain(ms)
+            # 双门槛（命中数 + 成链数），各自「绝对达标 **或** 占较短书抽样页数达标」。
+            # 绝对门槛拦大部头之间的噪声；比例门槛放行「全书就十几页」的短篇
+            # （v1.1.1 修复：旧代码第三道 if 里 n_match < pre_min 恒为 False——
+            #   能走到那一步的必然已过绝对门槛——比例兜底从未生效过，短篇召回受损）。
+            # （实测：粗筛分数 0.70 下，nm≥5 & LIS≥5 只剩 701 对，几乎全是真重复；
+            #   只查 nm≥5 不查 LIS 会放进 1083 对，其中夹杂大量共享公共页的噪声。）
+            ok_m = n_match >= settings.pre_min or n_match >= settings.pre_ratio * span
+            ok_c = chain >= settings.pre_min or chain >= settings.pre_ratio * span
+            if not (ok_m and ok_c):
+                continue
             cand.add((int(uniq[k]), int(uniq[k + 1 + t])))
         done += 1
         if on_progress and (done % 20 == 0 or done == nb):
@@ -782,6 +902,8 @@ def group_books(cache: FeatureCache, settings: GroupSettings,
     nthreads = settings.threads or max(1, min(8, (os.cpu_count() or 4)))
     lock = threading.Lock()
     tiles_cache: dict = {}
+    tiles_fifo: deque = deque()          # 简单 FIFO 淘汰
+    tiles_max = 500                      # 约 500 本 × 35 页的图块 ≈ 70MB，够覆盖一轮精比
 
     def tiles_of(bid: int, need_tile: bool = True):
         with lock:
@@ -790,9 +912,13 @@ def group_books(cache: FeatureCache, settings: GroupSettings,
                 return t
         d = cache.tiles_for_books([bid]).get(bid, [])
         with lock:
-            if len(tiles_cache) > 40:      # 简单 LRU：满了就整体清掉，避免占内存
-                tiles_cache.clear()
-            tiles_cache[bid] = d
+            if bid not in tiles_cache:
+                tiles_cache[bid] = d
+                tiles_fifo.append(bid)
+                # 旧实现是「超过 40 本就整体 clear()」——候选对上万时会反复丢掉刚用过的书，
+                # 每次都重新查库 + zlib 解压同一批图块。改成有上限的 FIFO 淘汰。
+                while len(tiles_fifo) > tiles_max:
+                    tiles_cache.pop(tiles_fifo.popleft(), None)
         return d
 
     def work(pair):
@@ -812,13 +938,25 @@ def group_books(cache: FeatureCache, settings: GroupSettings,
         ms = _greedy_match(M, thr)
         if len(ms) < settings.min_pages:
             return None
-        ratio = len(ms) / float(max(1, min(len(da), len(db))))
-        if ratio < settings.ratio_thr:
+        chain = _lis_chain(ms)
+        if chain < settings.min_pages:
             return None
-        if not _order_consistent(ms, [x[0] for x in da], [x[0] for x in db]):
+        # 成链页数占较短那本抽样页数的比例 —— 拦「只共享几页公共页」的假重复。
+        # 比例不够但链长 ≥ chain_floor 的放行：LIS≥8 本身已是强证据（见 GroupSettings），
+        # 不应被「抽样页数多导致的隐式比例地板」切掉（v1.1.1）。chain_floor=0 关闭此豁免。
+        ratio = chain / float(max(1, min(len(da), len(db))))
+        floor = settings.chain_floor
+        if ratio < settings.ratio_thr and (floor <= 0 or chain < floor):
+            return None
+        # 成链页数占命中页数的比例 —— 拦「页序乱跳」的噪声对
+        if chain < settings.in_order * len(ms):
             return None
         pairs = [(int(da[i][0]), int(db[j][0]), round(s, 4)) for (i, j, s) in ms]
-        return (ia, ib, len(ms), ratio, float(np.mean([s for (_i, _j, s) in ms])), pairs)
+        rel = _relation(ms, [x[0] for x in da], [x[0] for x in db],
+                        int(meta.get(ia, {}).get("pages", 0)),
+                        int(meta.get(ib, {}).get("pages", 0)))
+        score = float(np.mean([s for (_i, _j, s) in ms]))
+        return (ia, ib, chain, len(ms), ratio, score, rel, pairs)
 
     n_done = 0
     with ThreadPoolExecutor(max_workers=nthreads) as ex:
@@ -837,11 +975,11 @@ def group_books(cache: FeatureCache, settings: GroupSettings,
                 on_progress(f"精比 {n_done}/{len(cand)}，判重书对 {len(pairs_out)}")
 
     # ---- 并查集 + 组代表互验
-    pairs_out.sort(key=lambda t: -t[4])
+    pairs_out.sort(key=lambda t: -t[5])
     by_book: dict = {}
-    for (ia, ib, cnt, ratio, score, pr) in pairs_out:
-        by_book.setdefault(ia, []).append((ib, cnt, ratio, score, pr))
-        by_book.setdefault(ib, []).append((ia, cnt, ratio, score, pr))
+    for (ia, ib, chain, nm, ratio, score, rel, pr) in pairs_out:
+        by_book.setdefault(ia, []).append((ib, chain, nm, ratio, score, rel, pr))
+        by_book.setdefault(ib, []).append((ia, chain, nm, ratio, score, rel, pr))
     uf = UnionFind()
     for b in uniq:
         uf.find(int(b))
@@ -853,7 +991,7 @@ def group_books(cache: FeatureCache, settings: GroupSettings,
             best_rep[root] = bid
         return best_rep[root]
 
-    for (ia, ib, cnt, ratio, score, pr) in pairs_out:
+    for (ia, ib, chain, nm, ratio, score, rel, pr) in pairs_out:
         ra, rb = uf.find(ia), uf.find(ib)
         if ra == rb:
             continue
@@ -888,13 +1026,13 @@ def group_books(cache: FeatureCache, settings: GroupSettings,
             rel = by_book.get(bid, [])
             rel = [x for x in rel if uf.find(x[0]) == uf.find(bid)]
             if rel:
-                best = max(rel, key=lambda x: x[3])
-                m.score, m.matched, m.ratio = best[3], best[1], best[2]
-                m.pairs = best[4]
-                others = [x for x in rel if x[3] >= settings.page_thr]
+                best = max(rel, key=lambda x: x[4])   # 按 score 取最可信的一条关系
+                m.score, m.matched, m.ratio = best[4], best[1], best[3]
+                m.pairs = best[6]
+                m.relation = best[5]
                 m.matched = max([x[1] for x in rel])
-                m.score = max([x[3] for x in rel])
-                m.ratio = max([x[2] for x in rel])
+                m.score = max([x[4] for x in rel])
+                m.ratio = max([x[3] for x in rel])
             ms.append(m)
         ms.sort(key=lambda x: (-x.score, x.path.lower()))
         keep = _book_quality(ms)
@@ -917,12 +1055,12 @@ def group_books(cache: FeatureCache, settings: GroupSettings,
 
 
 def _pair_ok(by_book: dict, a: int, b: int, settings: GroupSettings) -> bool:
-    """查 a、b 之间是否已经算过并达标。"""
-    for (x, cnt, ratio, score, _pr) in by_book.get(a, ()):
-        if x == b and cnt >= settings.min_pages and ratio >= settings.ratio_thr:
+    """查 a、b 之间是否已经算过并达标（成链页数 + 命中率）。"""
+    for (x, chain, _nm, ratio, _score, _rel, _pr) in by_book.get(a, ()):
+        if x == b and chain >= settings.min_pages and ratio >= settings.ratio_thr:
             return True
-    for (x, cnt, ratio, score, _pr) in by_book.get(b, ()):
-        if x == a and cnt >= settings.min_pages and ratio >= settings.ratio_thr:
+    for (x, chain, _nm, ratio, _score, _rel, _pr) in by_book.get(b, ()):
+        if x == a and chain >= settings.min_pages and ratio >= settings.ratio_thr:
             return True
     return False
 
@@ -931,8 +1069,8 @@ def _pair_ok(by_book: dict, a: int, b: int, settings: GroupSettings) -> bool:
 
 
 CSV_HEADER = ["组号", "建议保留", "单行本名称", "载体", "格式", "文件大小(字节)",
-              "文件大小", "图片总页数", "抽样页数", "组内相似度", "匹配页数", "命中率",
-              "完整路径"]
+              "文件大小", "图片总页数", "抽样页数", "组内相似度", "成链页数", "命中率",
+              "关系", "完整路径"]
 
 
 def export_csv(groups: Sequence[Group], path: Path, root: Optional[Path] = None) -> int:
@@ -954,7 +1092,8 @@ def export_csv(groups: Sequence[Group], path: Path, root: Optional[Path] = None)
                 w.writerow([g.gid, "★保留" if m.keep else "", Path(m.path).name,
                             "文件夹" if m.kind == "folder" else "压缩包", m.fmt,
                             m.size, core.human_size(m.size), m.pages, m.sampled,
-                            f"{m.score:.3f}", m.matched, f"{m.ratio:.2f}", str(m.path)])
+                            f"{m.score:.3f}", m.matched, f"{m.ratio:.2f}",
+                            m.relation, str(m.path)])
                 n += 1
     return n
 

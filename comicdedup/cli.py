@@ -137,6 +137,64 @@ def fmt_bytes(n) -> str:
 # ------------------------------------------------------------------ 扫描
 
 
+def _fmt_groups(groups, show: int) -> None:
+    """把分组结果按统一格式打到控制台（cmd_scan / cmd_regroup 共用）。"""
+    for g in groups[:show]:
+        say("")
+        say(f"[组 {g.gid}] 相似度 {g.score:.3f}  共 {len(g.members)} 本  "
+            f"合计 {fmt_bytes(g.total_size)}  可省 {fmt_bytes(g.wasted)}")
+        for m in g.members:
+            rel = f"  [{m.relation}]" if m.relation else ""
+            say(f"   {'*保留' if m.keep else '     '} {m.score:.3f} 成链{m.matched:>3}页 "
+                f"({m.ratio:.0%}) {m.pages:>4}页 {fmt_bytes(m.size):>10}  {Path(m.path).name}{rel}")
+            say(f"            {m.path}")
+    if len(groups) > show:
+        say(f"\n...另有 {len(groups) - show} 组，见 CSV")
+
+
+def cmd_regroup(a) -> int:
+    """不重新扫描，直接用现有缓存重新比对分组。
+
+    用途：扫描一次之后反复调判据（阈值 / 预筛 / 采样），不用重扫几百 GB。
+    与界面上的「重新分组」完全等价。
+    """
+    t0 = time.time()
+    cache = FeatureCache(Path(a.db) if a.db else None)
+    st = cache.stats()
+    if not st.get("pages"):
+        say("[FAIL] 缓存里没有页特征，请先跑一次 --scan")
+        cache.close()
+        return 2
+    say(f"== {APP_NAME} v{__version__} ==  重新分组（不重新扫描）")
+    say(f"缓存     : {cache.path}")
+    say(f"         : {st.get('books')} 本 / {st.get('pages')} 页特征")
+
+    s = ScanSettings.from_preset(a.preset, page_thr=a.sim, min_pages=a.min_pages,
+                                 ratio_thr=a.ratio, in_order=a.in_order,
+                                 coarse_thr=a.coarse, pre_min=a.pre_min,
+                                 pre_ratio=a.pre_ratio, threads=a.jobs)
+    gs = GroupSettings(page_thr=s.page_thr, min_pages=s.min_pages, ratio_thr=s.ratio_thr,
+                       in_order=s.in_order, coarse_thr=s.coarse_thr, pre_min=s.pre_min,
+                       pre_ratio=s.pre_ratio, chain_floor=a.chain_floor, threads=s.threads)
+    say(f"判据     : 页级 {gs.page_thr} / 最少 {gs.min_pages} 页 / 命中率 {gs.ratio_thr} "
+        f"(链长地板 {gs.chain_floor}) / 预筛 {gs.coarse_thr} + {gs.pre_min} 页")
+    say("")
+    say("正在比对分组 ...")
+    groups, _pairs, gstat = group_books(cache, gs, on_progress=lambda m: say("  " + m))
+    say("")
+    say(f"== 结果 ==  书 {gstat.get('books')} 本 / 页 {gstat.get('pages')} 页 / "
+        f"候选书对 {gstat.get('candidates')} / 判重书对 {gstat.get('pair_hits')}")
+    say(f"重复组 {len(groups)} 组，涉及 {gstat.get('dup_books', 0)} 本，"
+        f"可回收 {fmt_bytes(sum(g.wasted for g in groups))}")
+    _fmt_groups(groups, a.show)
+    if a.csv:
+        n = export_csv(groups, Path(a.csv))
+        say(f"\n[OK] 重复清单已导出：{a.csv}（{n} 行）")
+    cache.close()
+    say(f"\n总耗时 {time.time() - t0:.1f} 秒")
+    return 0
+
+
 def cmd_scan(a) -> int:
     root = Path(a.scan).expanduser().resolve()
     if not root.is_dir():
@@ -144,7 +202,9 @@ def cmd_scan(a) -> int:
         return 2
     s = ScanSettings.from_preset(a.preset, root=root,
                                  page_thr=a.sim, min_pages=a.min_pages,
-                                 ratio_thr=a.ratio, coarse_thr=a.coarse,
+                                 ratio_thr=a.ratio, in_order=a.in_order,
+                                 coarse_thr=a.coarse, pre_min=a.pre_min,
+                                 pre_ratio=a.pre_ratio,
                                  use_cache=not a.no_cache,
                                  do_deskew=not a.no_deskew,
                                  max_books=a.limit,
@@ -153,8 +213,8 @@ def cmd_scan(a) -> int:
     t0 = time.time()
     say(f"== {APP_NAME} v{__version__} ==")
     say(f"根目录   : {root}")
-    say(f"采样预设 : {a.preset}  (锚点 {s.anchors} / 窗口 ±{s.window} / 上限 {s.max_pages} 页)")
-    say(f"页级阈值 : {s.page_thr}   最少匹配页数 {s.min_pages}   命中率下限 {s.ratio_thr}")
+    say(f"采样预设 : {a.preset}  (块数 {s.anchors} / 每块半宽 {s.window} / 上限 {s.max_pages} 页)")
+    say(f"页级阈值 : {s.page_thr}   最少成链页数 {s.min_pages}   命中率下限 {s.ratio_thr}")
     say(f"缓存     : {'关闭' if a.no_cache else cache.path}")
     say("")
 
@@ -181,7 +241,8 @@ def cmd_scan(a) -> int:
     say("")
     say("正在比对分组 ...")
     gs = GroupSettings(page_thr=s.page_thr, min_pages=s.min_pages, ratio_thr=s.ratio_thr,
-                       coarse_thr=s.coarse_thr, pre_min=s.pre_min, threads=s.threads)
+                       in_order=s.in_order, coarse_thr=s.coarse_thr, pre_min=s.pre_min,
+                       pre_ratio=s.pre_ratio, chain_floor=a.chain_floor, threads=s.threads)
     groups, pairs, gstat = group_books(cache, gs, on_progress=lambda m: say("  " + m))
     say("")
 
@@ -194,8 +255,9 @@ def cmd_scan(a) -> int:
         say(f"[组 {g.gid}] 相似度 {g.score:.3f}  共 {len(g.members)} 本  "
             f"合计 {fmt_bytes(g.total_size)}  可省 {fmt_bytes(g.wasted)}")
         for m in g.members:
-            say(f"   {'*保留' if m.keep else '     '} {m.score:.3f} 匹配{m.matched:>3}页 "
-                f"({m.ratio:.0%}) {m.pages:>4}页 {fmt_bytes(m.size):>10}  {Path(m.path).name}")
+            rel = f"  [{m.relation}]" if m.relation else ""
+            say(f"   {'*保留' if m.keep else '     '} {m.score:.3f} 成链{m.matched:>3}页 "
+                f"({m.ratio:.0%}) {m.pages:>4}页 {fmt_bytes(m.size):>10}  {Path(m.path).name}{rel}")
             say(f"            {m.path}")
     if len(groups) > a.show:
         say(f"\n...另有 {len(groups) - a.show} 组，见 CSV")
@@ -292,10 +354,19 @@ def cmd_selftest(a) -> int:
         chk(al2 < 0.55, "不同页平移精比低分（不误报）", f"{al2:.3f}")
 
     say("\n[4] 采样策略")
-    idx = core and _selftest_sampling()
+    idx = _selftest_sampling()
     chk(len(idx) >= 5, f"一本 180 页的书抽到 {len(idx)} 页内页")
     chk(0 not in idx, "跳过封面（第 0 页）")
     chk(max(idx) < 180, "不越界")
+    # 块语义（v1.1）：抽到的页应聚成 4 个**连续块**，而不是均匀散点。
+    # 块越长越能容忍两版页数差（页数差 ΔP 时，全书 85% 处的对应页偏移 ≈ 0.85·ΔP）。
+    blocks = 1 + sum(1 for a, b in zip(idx, idx[1:]) if b - a > 1)
+    chk(blocks == 4, "抽到的页聚成 4 个连续块（块采样）", f"{blocks} 块")
+    chk(all(b - a == 1 or b - a > 13 for a, b in zip(idx, idx[1:])),
+        "块内页号连续（间隙只出现在块与块之间）")
+    chk(min(idx) > 180 * 0.05 and max(idx) < 180 * 0.95,
+        "块不贴书头尾（另一版多出的页常堆在两端）",
+        f"首 {min(idx)} / 末 {max(idx)}")
 
     say("\n[5] 安全与隐私")
     from . import engine as E
@@ -365,8 +436,10 @@ def cmd_selftest(a) -> int:
 
 
 def _selftest_sampling():
+    """标准档（4 块 × 13 页）的块采样 —— 自检核对的是**块语义**：
+    页号聚成连续块、块中心避开书头尾，而不是旧版的均匀散点。"""
     from .engine import sample_indices
-    return sample_indices(180, 8, 2, 40)
+    return sample_indices(180, 4, 6, 52)
 
 
 def _selftest_separation(chk):
@@ -579,11 +652,22 @@ def build_parser() -> argparse.ArgumentParser:
                    help="采样预设：快速 / 标准 / 彻底 / 全页（默认 标准）")
     p.add_argument("--sim", type=float, default=0.62, help="页级相似度阈值（默认 0.62）")
     p.add_argument("--min-pages", type=int, default=3, dest="min_pages",
-                   help="至少多少页匹配才算同一本（默认 3）")
+                   help="至少多少页成链（页序对得上）才算同一本（默认 3）")
     p.add_argument("--ratio", type=float, default=0.25, help="命中率下限（默认 0.25）")
-    p.add_argument("--coarse", type=float, default=0.55, help="粗筛阈值（默认 0.55）")
+    p.add_argument("--in-order", type=float, default=0.6, dest="in_order",
+                   help="成链页数 / 命中页数下限，拦「页序乱跳」的噪声对（默认 0.6）")
+    p.add_argument("--coarse", type=float, default=0.70,
+                   help="候选预筛的页级阈值（默认 0.70，作用在 16x16 粗筛图上）")
+    p.add_argument("--pre-min", type=int, default=5, dest="pre_min",
+                   help="预筛：命中页数+成链页数都达此数才送进精比（默认 5）")
+    p.add_argument("--pre-ratio", type=float, default=0.2, dest="pre_ratio",
+                   help="预筛兜底比例：页数少的书按比例放宽（默认 0.2）")
+    p.add_argument("--chain-floor", type=int, default=8, dest="chain_floor",
+                   help="精比比例门槛之外的绝对链长地板：成链页数≥此值即达标（默认 8，0=关闭）")
     p.add_argument("--jobs", type=int, default=0,
                    help="工作线程数，扫描与精比共用（默认 0=自动，即 min(8, CPU 核数)）")
+    p.add_argument("--regroup", action="store_true",
+                   help="不重新扫描，直接用现有缓存重新比对分组（调参 / 改判据后重跑用）")
     p.add_argument("--limit", type=int, default=0, help="只处理前 N 本（调试用）")
     p.add_argument("--show", type=int, default=20, help="命令行里最多打印几组")
     p.add_argument("--db", metavar="FILE", help="指定缓存数据库文件位置")
@@ -627,6 +711,8 @@ def main(argv=None) -> int:
         return cmd_clear(args)
     if args.scan:
         return cmd_scan(args)
+    if args.regroup:
+        return cmd_regroup(args)
 
     # 无参数 → 图形界面
     try:

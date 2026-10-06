@@ -22,6 +22,14 @@ ui.json
 # ---- 本地 AI 助手工作区数据（含本机路径与项目记忆）----
 .workbuddy/
 
+# ---- 本地开发文档（开发过程记录，不随仓库分发）----
+docs/ROADMAP.md
+docs/AUDIT-2026-10-05.md
+docs/调研-*.md
+docs/学习-*.md
+docs/算法改造方案-*.md
+docs/审计-*.md
+
 # ---- 打包产物（走 GitHub Releases 分发，不入库）----
 dist/
 build/
@@ -35,3 +43,6 @@ _tmp/
 tools/_debug_*.png
 tools/_dbg*.py
 tools/_sweep.py
+
+# ---- 学习用参考项目（第三方仓库，只读参考，不分发）----
+_study/

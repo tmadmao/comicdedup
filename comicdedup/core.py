@@ -73,9 +73,14 @@ BLANK_INK = 0.004
 MIN_CROP_KEEP = 0.30
 """自动裁剪的安全阀：单边裁掉超过 70% 就认为裁错了，放弃裁剪。"""
 
-FEAT_VER = "c1"
+FEAT_VER = "c2"
 """特征算法版本。任何改动影响特征数值的修改都必须升级这个字符串，
-否则旧缓存里的特征会被当成新版本误用。"""
+否则旧缓存里的特征会被当成新版本误用。
+
+c1 → c2：采样方式从「8 锚点 × ±2 页」改成「4 块 × 13 页」（见 engine.sample_indices）。
+特征本身（页图块 / pHash / map16）没变，但**抽哪几页**变了，旧缓存里存的
+是旧采样抽出来的页，必须失效重扫，否则块采样不生效。
+"""
 
 
 # ------------------------------------------------------------------ 小工具
@@ -836,9 +841,13 @@ def aligned_similarity(ta: np.ndarray, tb: np.ndarray, tpl: int = TPL) -> float:
     因为「扫描版噪声大、DL 版干净」会让两版的裁剪量不一致，引入更大的相对尺度差。
     与其追求完美裁剪，不如让**度量自己把错位搜出来**：同页最低分从 0.24 提到 0.65，
     异页 p99 只有 0.43，从「完全不可分」变成「可以判」。
+
+    ⚠ 输入必须是已归一化的 uint8 图块。函数内部不再做 ``astype(float32)`` 拷贝 ——
+    那个拷贝在精比热路径上被重复执行了百万次（实测占总耗时的一半），
+    改由调用方一次性转好，这里直接吃 float32。
     """
-    a = ta.astype(np.float32)
-    b = tb.astype(np.float32)
+    a = ta if ta.dtype == np.float32 else ta.astype(np.float32)
+    b = tb if tb.dtype == np.float32 else tb.astype(np.float32)
     n = a.shape[0]
     if tpl >= n:
         tpl = n

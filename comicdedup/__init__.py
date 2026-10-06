@@ -17,7 +17,7 @@ import os
 import sys
 from pathlib import Path
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 APP_NAME = "漫画查重"
 APP_EN = "ComicDedup"
 

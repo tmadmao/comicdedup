@@ -279,7 +279,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.tree = QtWidgets.QTreeWidget()
         self.tree.setColumnCount(6)
-        self.tree.setHeaderLabels(["单行本名称", "文件大小", "图片页数", "相似度", "匹配页数", "完整路径"])
+        self.tree.setHeaderLabels(["单行本名称", "文件大小", "图片页数", "相似度", "成链页数", "完整路径"])
         self.tree.setRootIsDecorated(True)
         self.tree.setUniformRowHeights(False)
         self.tree.setIconSize(QtCore.QSize(THUMB_W, THUMB_H))
@@ -602,8 +602,9 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         s = self._settings()
         gs = GroupSettings(page_thr=s.page_thr, min_pages=s.min_pages,
-                           ratio_thr=s.ratio_thr, coarse_thr=s.coarse_thr,
-                           threads=s.threads)
+                           ratio_thr=s.ratio_thr, in_order=s.in_order,
+                           coarse_thr=s.coarse_thr, pre_min=s.pre_min,
+                           pre_ratio=s.pre_ratio, threads=s.threads)
         if not silent:
             self.logline("info", f"重新分组：阈值 {gs.page_thr:.2f} / "
                                  f"最少 {gs.min_pages} 页 / 命中率 ≥ {gs.ratio_thr:.2f}")
@@ -654,8 +655,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 it.setText(4, str(m.matched))
                 it.setText(5, m.path)
                 it.setToolTip(5, m.path)
-                it.setToolTip(0, f"匹配 {m.matched} 页 / 命中率 {m.ratio:.0%} / "
-                                 f"抽样 {m.sampled} 页\n{m.path}")
+                it.setToolTip(0, f"成链 {m.matched} 页 / 命中率 {m.ratio:.0%} / "
+                                 f"抽样 {m.sampled} 页"
+                                 + (f"\n关系：{m.relation}" if m.relation else "")
+                                 + f"\n{m.path}")
                 it.setFlags(q("ItemFlag.ItemIsEnabled") | q("ItemFlag.ItemIsSelectable")
                             | q("ItemFlag.ItemIsUserCheckable"))
                 it.setCheckState(0, q("CheckState.Unchecked"))
@@ -703,8 +706,8 @@ class MainWindow(QtWidgets.QMainWindow):
             f"载体：{'图片文件夹' if m.kind == 'folder' else '压缩包'}（{m.fmt}）\n"
             f"文件大小：{human_size(m.size)}\n"
             f"图片总页数：{m.pages}　　抽样比对：{m.sampled} 页\n"
-            f"组内相似度：{m.score:.3f}　　匹配页数：{m.matched}　"
-            f"命中率：{m.ratio:.0%}\n"
+            f"组内相似度：{m.score:.3f}　　成链页数：{m.matched}　"
+            f"命中率：{m.ratio:.0%}" + (f"\n关系：{m.relation}" if m.relation else "") + "\n"
             f"路径：{m.path}")
         pm = self._preview_pixmap(m.thumb)
         if pm is not None:

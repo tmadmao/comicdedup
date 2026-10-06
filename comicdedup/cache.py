@@ -231,14 +231,21 @@ class FeatureCache:
         return [dict(r) for r in rows]
 
     def tiles_for_books(self, book_ids: Sequence[int]) -> dict:
-        """取指定书的页图块：{book_id: [(idx, tile_bytes), ...]}。"""
+        """取指定书的页图块：{book_id: [(idx, tile_bytes, map16, phash, px), ...]}。
+
+        过滤条件与 :meth:`all_pages` 保持一致（``blank=0`` 且 ``books.status='ok'``），
+        这样按书拼接出来的页序与页特征矩阵**逐行对齐** —— 候选预筛会把图块描述子
+        铺进一个大矩阵，一旦两者集合不同就会错位。
+        """
         if not book_ids:
             return {}
         q = ",".join("?" for _ in book_ids)
         with self._lock:
             rows = self.conn.execute(
-                f"SELECT book_id, idx, tile, map16, phash, px FROM pages WHERE book_id IN ({q}) "
-                f"AND blank=0 ORDER BY book_id, idx", tuple(book_ids)).fetchall()
+                f"SELECT p.book_id, p.idx, p.tile, p.map16, p.phash, p.px "
+                f"FROM pages p JOIN books b ON b.id=p.book_id "
+                f"WHERE p.book_id IN ({q}) AND p.blank=0 AND b.status='ok' "
+                f"ORDER BY p.book_id, p.idx", tuple(book_ids)).fetchall()
         out: dict = {}
         for r in rows:
             out.setdefault(int(r["book_id"]), []).append(
