@@ -140,7 +140,7 @@ Windows 本地漫画查重桌面程序。**纯本地离线运行**，专门解�
 ```
 360 安全卫士 · 主动防御
   动作：进程创建
-  路径：...\dist\ComicDedupTool.exe
+  路径：...\\dist\\ComicDedupTool.exe
   木马名称：HEUR/QVM202.0.8C7D.Malware.Gen
   处置：已清除（自动阻止，无提示）
 ```
