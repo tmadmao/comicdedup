@@ -177,6 +177,10 @@ def main() -> int:
         if m is not None and not m.keep and i > 0:
             it.setCheckState(0, q("CheckState.Checked"))
 
+    t0 = time.time()
+    while getattr(w, "_page_threads", None) and time.time() - t0 < 20:
+        app.processEvents()
+        time.sleep(0.05)
     app.processEvents()
 
     DOCS.mkdir(parents=True, exist_ok=True)

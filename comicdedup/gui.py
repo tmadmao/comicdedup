@@ -26,13 +26,14 @@ from pathlib import Path
 from . import APP_NAME, __version__, data_dir
 from .core import DEFAULT_CROP, human_size
 from .engine import (PRESETS, PRESET_HELP, GroupSettings, Member, ScanSettings, ScanWorker,
-                     delete_paths, export_csv, export_log, group_books)
+                     delete_paths, export_csv, export_log, group_books, read_page_image)
 from .cache import FeatureCache
 from .qtcompat import QT_BINDING, Signal, Slot, enum, exec_app, q
 from .qtcompat import QtCore, QtGui, QtWidgets
 
 THUMB_W, THUMB_H = 46, 64
 PREVIEW_H = 420
+PAGE_H = 300   # 成链对比区每栏的显示高度（漫画竖版，高度定死、宽度自适应）
 
 
 # 跨绑定常量（PyQt5 是扁平枚举，PyQt6/PySide6 是作用域枚举 —— 用 enum() 统一）
@@ -109,6 +110,27 @@ class DeleteThread(QtCore.QThread):
         self.sig_done.emit(r)
 
 
+class PageThread(QtCore.QThread):
+    """按需从原书读出**一对页**（成链对比用）。
+
+    压缩包可能在 NAS 上，7z/rar 读一页要靠外部解压程序，一次可能要几百毫秒
+    到一秒多 —— 同步读会把界面卡住，所以放后台。连续点列表时会有多个请求，
+    界面侧用一个递增序号过滤掉「已经过时」的结果（只显示最后一次点的那对）。
+    """
+    sig_done = Signal(int, object, object)   # (序号, 本项页字节|None, 对方页字节|None)
+
+    def __init__(self, seq: int, path_a: str, idx_a: int, path_b: str, idx_b: int):
+        super().__init__()
+        self.seq = seq
+        self.path_a, self.idx_a = path_a, idx_a
+        self.path_b, self.idx_b = path_b, idx_b
+
+    def run(self):
+        a = read_page_image(self.path_a, self.idx_a, max_side=PAGE_H) if self.path_a else None
+        b = read_page_image(self.path_b, self.idx_b, max_side=PAGE_H) if self.path_b else None
+        self.sig_done.emit(self.seq, a, b)
+
+
 # ================================================================== 主窗口
 
 
@@ -124,6 +146,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.scan_thread: ScanThread | None = None
         self.group_thread: GroupThread | None = None
         self.del_thread: DeleteThread | None = None
+        self._load_seq = 0
+        self._page_threads: list = []   # 在跑的读图线程（持引用，结束自动摘除）
         self.root: Path | None = None
         self._build_ui()
         self._load_cfg()
@@ -314,20 +338,35 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lb_meta.setWordWrap(True)
         lay.addWidget(self.lb_meta)
 
-        self.lb_cover = QtWidgets.QLabel()
-        self.lb_cover.setAlignment(q("AlignmentFlag.AlignCenter"))
-        self.lb_cover.setMinimumHeight(PREVIEW_H + 8)
-        self.lb_cover.setStyleSheet("background:#f2f2f2; border:1px solid #ccc;")
-        self.lb_cover.setText("封面预览")
-        lay.addWidget(self.lb_cover)
+        # ---- 成链对比：左右并排看两本书的对应页（漫画竖版，一人一半正合适）
+        lay.addWidget(QtWidgets.QLabel("成链对比（点击下面列表逐对核对）："))
+        cmp_row = QtWidgets.QHBoxLayout()
 
-        self.tb_pairs = QtWidgets.QTableWidget(0, 3)
-        self.tb_pairs.setHorizontalHeaderLabels(["本项页号", "对方页号", "页相似度"])
-        self.tb_pairs.horizontalHeader().setStretchLastSection(True)
-        self.tb_pairs.verticalHeader().setVisible(False)
-        self.tb_pairs.setMaximumHeight(200)
-        lay.addWidget(QtWidgets.QLabel("匹配上的内页（人工核对用）："))
-        lay.addWidget(self.tb_pairs)
+        def _mkcol(cap):
+            v = QtWidgets.QVBoxLayout()
+            v.setContentsMargins(0, 0, 0, 0)
+            lb = QtWidgets.QLabel(cap)
+            lb.setAlignment(q("AlignmentFlag.AlignCenter"))
+            img = QtWidgets.QLabel()
+            img.setAlignment(q("AlignmentFlag.AlignCenter"))
+            img.setMinimumHeight(PAGE_H)
+            img.setStyleSheet("background:#f2f2f2; border:1px solid #ccc;")
+            img.setText("—")
+            v.addWidget(lb)
+            v.addWidget(img, 1)
+            return v, lb, img
+
+        va, self.lb_cap_a, self.lb_img_a = _mkcol("本项")
+        vb, self.lb_cap_b, self.lb_img_b = _mkcol("对比对象")
+        cmp_row.addLayout(va)
+        cmp_row.addLayout(vb)
+        lay.addLayout(cmp_row)
+
+        self.lst_pairs = QtWidgets.QListWidget()
+        self.lst_pairs.setMaximumHeight(150)
+        self.lst_pairs.currentRowChanged.connect(self._on_pair_picked)
+        lay.addWidget(QtWidgets.QLabel("匹配上的内页："))
+        lay.addWidget(self.lst_pairs)
 
         row = QtWidgets.QHBoxLayout()
         self.btn_open = QtWidgets.QPushButton("打开所在文件夹")
@@ -478,6 +517,10 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.group_thread and self.group_thread.isRunning():
                 self.group_thread.stop()
                 self.group_thread.wait(3000)
+            # 读图线程不可中断（解压/PIL 里没有取消点），只能等它自己读完，
+            # 一般几百毫秒；等不到就放弃，总比退出时崩溃强。
+            for th in list(self._page_threads):
+                th.wait(3000)
         except Exception:
             pass
         try:
@@ -687,9 +730,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not items:
             self.lb_title.setText("（未选中）")
             self.lb_meta.setText("")
-            self.lb_cover.setPixmap(QtGui.QPixmap())
-            self.lb_cover.setText("封面预览")
-            self.tb_pairs.setRowCount(0)
+            self._fill_pairs(None)
             return
         it = items[0]
         m: Member | None = it.data(0, q("ItemDataRole.UserRole"))
@@ -706,25 +747,77 @@ class MainWindow(QtWidgets.QMainWindow):
             f"组内相似度：{m.score:.3f}　　成链页数：{m.matched}　"
             f"命中率：{m.ratio:.0%}" + (f"\n关系：{m.relation}" if m.relation else "") + "\n"
             f"路径：{m.path}")
-        pm = self._preview_pixmap(m.thumb_img)
-        if pm is not None:
-            self.lb_cover.setPixmap(pm)
-        else:
-            self.lb_cover.setPixmap(QtGui.QPixmap())
-            self.lb_cover.setText("（没有封面缩略图 —— 用「查看封面大图」直接从原文件读）")
-        self.tb_pairs.setRowCount(min(len(m.pairs), 200))
-        for r, (ia, ib, sc) in enumerate(m.pairs[:200]):
-            self.tb_pairs.setItem(r, 0, QtWidgets.QTableWidgetItem(str(ia)))
-            self.tb_pairs.setItem(r, 1, QtWidgets.QTableWidgetItem(str(ib)))
-            self.tb_pairs.setItem(r, 2, QtWidgets.QTableWidgetItem(f"{sc:.3f}"))
+        self._fill_pairs(m)
 
-    def _preview_pixmap(self, data: bytes):
-        if not data:
-            return None
+    # -------------------------------------------------------- 成链对比
+
+    def _fill_pairs(self, m: Member | None):
+        """填成链页列表，并自动加载第一对对比图。"""
+        self.lst_pairs.blockSignals(True)
+        self.lst_pairs.clear()
+        self.lst_pairs.blockSignals(False)
+        self._clear_pages()
+        if m is None or not m.pairs:
+            self.lb_cap_a.setText("本项")
+            self.lb_cap_b.setText("对比对象")
+            return
+        self.lst_pairs.blockSignals(True)
+        self.lst_pairs.clear()
+        for k, (ia, ib, sc) in enumerate(m.pairs[:300]):
+            self.lst_pairs.addItem(
+                f"第 {k + 1} 对：本项 P{ia}  ↔  对方 P{ib}　相似度 {sc:.3f}")
+        self.lst_pairs.setCurrentRow(0)     # 放在 blockSignals 里，避免重复触发加载
+        self.lst_pairs.blockSignals(False)
+        self.lb_cap_a.setText("本项：" + Path(m.path).name[:20])
+        self.lb_cap_b.setText("对比对象：" + (Path(m.peer_path).name[:20] if m.peer_path else "（同组另一本）"))
+        self._load_pair(0)
+
+    def _clear_pages(self):
+        for img in (self.lb_img_a, self.lb_img_b):
+            img.setPixmap(QtGui.QPixmap())
+            img.setText("—")
+
+    def _on_pair_picked(self, row: int):
+        self._load_pair(row)
+
+    def _load_pair(self, row: int):
+        m = self._cur_member()
+        if m is None or not (0 <= row < len(m.pairs)):
+            return
+        ia, ib, _sc = m.pairs[row]
+        self._load_seq += 1
+        seq = self._load_seq
+        self.lb_img_a.setText("读取中…")
+        self.lb_img_b.setText("读取中…")
+        th = PageThread(seq, m.path, ia, m.peer_path, ib)
+        th.sig_done.connect(self._on_pages_loaded)
+        # 把所有线程挂进列表，结束后自动摘除 —— 不能只存一个 self._page_thread，
+        # 否则连续点列表时旧线程被覆盖、失去引用后被回收，而它还在运行，
+        # Qt 会直接崩（"QThread destroyed while thread is still running"）。
+        self._page_threads.append(th)
+        th.finished.connect(lambda t=th: self._forget_page_thread(t))
+        th.start()
+
+    def _forget_page_thread(self, th):
+        try:
+            self._page_threads.remove(th)
+        except ValueError:
+            pass
+        th.deleteLater()
+
+    def _on_pages_loaded(self, seq: int, da, db):
+        if seq != self._load_seq:       # 已经点了下一对，丢弃这个过时的结果
+            return
+        self._set_page(self.lb_img_a, da, "本项这一页读不到")
+        self._set_page(self.lb_img_b, db, "对方这一页读不到")
+
+    def _set_page(self, img, data, empty_text):
         pm = QtGui.QPixmap()
-        if not pm.loadFromData(bytes(data), "JPEG"):
-            return None
-        return pm.scaledToHeight(PREVIEW_H, q("TransformationMode.SmoothTransformation"))
+        if data and pm.loadFromData(bytes(data), "JPEG"):
+            img.setPixmap(pm)
+        else:
+            img.setPixmap(QtGui.QPixmap())
+            img.setText(empty_text)
 
     def _items_checked(self) -> list:
         out = []

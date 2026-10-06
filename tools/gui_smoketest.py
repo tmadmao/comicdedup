@@ -175,10 +175,10 @@ def main() -> int:
     w.on_select()
     chk("火影" in w.lb_title.text(), "详情标题跟随选中", w.lb_title.text())
     chk("压缩包" in w.lb_meta.text() and "页" in w.lb_meta.text(), "详情显示载体与页数")
-    chk(not w.lb_cover.pixmap().isNull(), "预览区显示出封面")
-    chk(w.tb_pairs.rowCount() == len(
-        it0.data(0, q("ItemDataRole.UserRole")).pairs), "匹配页表格行数正确",
-        f"{w.tb_pairs.rowCount()} 行")
+    m0 = it0.data(0, q("ItemDataRole.UserRole"))
+    chk(w.lst_pairs.count() == len(m0.pairs), "成链列表行数正确", f"{w.lst_pairs.count()} 行")
+    chk("本项" in w.lb_cap_a.text(), "对比区左栏标题已填", w.lb_cap_a.text())
+    chk("第 1 对" in w.lst_pairs.item(0).text(), "成链列表首行可读", w.lst_pairs.item(0).text())
 
     # ---- 4. 勾选
     g1 = w.tree.topLevelItem(0)

@@ -543,6 +543,55 @@ class ScanWorker:
             return b""
 
 
+def read_page_image(path: str, idx: int, max_side: int = 560) -> Optional[bytes]:
+    """按**自然排序后的页号**从原文件里读出这一页，缩到边长上限后返回 JPEG 字节。
+
+    给界面的「成链对比」用：逐页核对时按需从原书读取，不在缓存里另存一份
+    —— 缓存里只有 64×64 的比对图块，太小，根本看不清画的是什么。
+
+    页号与扫描时完全一致（都按 ``_natural_key`` 自然排序），所以 ``idx``
+    可以直接用 ``Member.pairs`` 里的值。失败返回 None（压缩包缺页、
+    文件已被移走、图片损坏等），调用方自己决定怎么提示。
+    """
+    from PIL import Image
+    import io as _io
+    from . import archives as A
+
+    p = Path(path)
+    try:
+        if p.is_dir():
+            files = sorted([f for f in p.iterdir()
+                            if f.is_file() and f.suffix.lower() in A.IMG_EXT],
+                           key=lambda f: A._natural_key(f.name))
+            if not (0 <= idx < len(files)):
+                return None
+            data = files[idx].read_bytes()
+        else:
+            be = A.open_book(p)
+            names = be.list_images()
+            if not (0 <= idx < len(names)):
+                return None
+            data = be.read(names[idx][0])
+    except Exception:
+        return None
+    if not data:
+        return None
+    try:
+        im = Image.open(_io.BytesIO(data))
+        im.load()
+        # 漫画是竖版长条：按高度限，宽度自适应，这样左右两栏并排放得下
+        if im.height > max_side:
+            w = max(1, int(im.width * max_side / im.height))
+            im = im.resize((w, max_side), Image.LANCZOS)
+        if im.mode not in ("RGB", "L"):
+            im = im.convert("RGB")
+        buf = _io.BytesIO()
+        im.save(buf, format="JPEG", quality=85)
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
 # ------------------------------------------------------------------ 分组
 
 
@@ -561,7 +610,8 @@ class Member:
     score: float = 0.0
     matched: int = 0          # 成链页数（页序对得上的页数）
     ratio: float = 0.0        # 成链页数 / 较短那本的抽样页数
-    pairs: list = field(default_factory=list)   # [(idx_a, idx_b, 分)]
+    pairs: list = field(default_factory=list)   # [(本项页号, 对方页号, 分)]
+    peer_path: str = ""       # 对比时「对方」那本书的完整路径（界面成链对比用）
     relation: str = ""        # 关系标签：完全相同 / 页码对齐·两版页数不同 / 有页码偏移 / 有页码偏移·两版页数不同
 
 
@@ -1029,6 +1079,7 @@ def group_books(cache: FeatureCache, settings: GroupSettings,
                 m.score, m.matched, m.ratio = best[4], best[1], best[3]
                 m.pairs = best[6]
                 m.relation = best[5]
+                m.peer_path = meta.get(best[0], {}).get("path", "")
                 m.matched = max([x[1] for x in rel])
                 m.score = max([x[4] for x in rel])
                 m.ratio = max([x[3] for x in rel])
