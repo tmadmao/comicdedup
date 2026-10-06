@@ -1,0 +1,37 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ---- 本工具运行期产生的本地数据（都在本机，不应提交）----
+# 默认数据目录是 %LOCALAPPDATA%\ComicDedup，不在仓库里；
+# 便携模式下会在程序目录建 data/，这里一并排除。
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+comics.sqlite*
+testdata.sqlite
+thumbs/
+ui.json
+崩溃日志.txt
+删除记录.csv
+*重复清单.csv
+
+# ---- 本地 AI 助手工作区数据（含本机路径与项目记忆）----
+.workbuddy/
+
+# ---- 打包产物（走 GitHub Releases 分发，不入库）----
+dist/
+build/
+build_test/
+*.spec
+
+# ---- 测试语料与临时产物 ----
+testdata/
+_tmp/
+*.tmp
+tools/_debug_*.png
+tools/_dbg*.py
+tools/_sweep.py
