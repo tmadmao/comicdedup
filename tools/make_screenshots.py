@@ -71,6 +71,30 @@ def decorate(png: Path, title: str) -> Path:
     return png
 
 
+def shrink(png: Path) -> Path:
+    """调色板量化 + 优化压缩。
+
+    界面截图是大片纯色 + 灰阶抗锯齿文字，用自适应 256 色调色板几乎看不出差别
+    （实测肉眼无差异），体积却能砍掉一半左右 —— README 里加载快一些。
+    """
+    try:
+        from PIL import Image
+    except Exception:
+        return png
+    try:
+        im = Image.open(png).convert("RGB")
+        q = im.convert("P", palette=Image.ADAPTIVE, colors=256)
+        tmp = png.with_name(png.stem + ".opt.png")
+        q.save(tmp, optimize=True)
+        if tmp.stat().st_size < png.stat().st_size:
+            tmp.replace(png)
+        else:
+            tmp.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return png
+
+
 # ================================================================== 主流程
 
 def main() -> int:
@@ -164,12 +188,14 @@ def main() -> int:
         print("截图失败")
         return 1
     decorate(m, w.windowTitle())
+    shrink(m)
 
     # ---- 2) 只抓分组树区域（README 里当特写用）
     m2 = ROOT / "docs" / "ui-groups.png"
     pm2 = w.tree.grab()
     if pm2.save(str(m2)):
         decorate(m2, "② 重复组（勾选要删除的项）—— 封面预览 / 名称 / 体积 / 页数 / 相似度 / 完整路径")
+        shrink(m2)
 
     print(f"已生成 {m.name}（{m.stat().st_size / 1024:.0f} KB）、"
           f"{m2.name}（{m2.stat().st_size / 1024:.0f} KB）")

@@ -226,7 +226,8 @@ def main() -> int:
 
     img = img.resize((W, H), Image.LANCZOS)
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    img.save(OUT)
+    # 自适应 256 色调色板：这张图是纯色块 + 文字抗锯齿，量化后肉眼无差异，体积能小一半
+    img.convert("P", palette=Image.ADAPTIVE, colors=256).save(OUT, optimize=True)
     print(f"已生成 {OUT}（{OUT.stat().st_size / 1024:.0f} KB，{W}×{H}）")
     return 0
 
