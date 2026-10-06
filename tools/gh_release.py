@@ -130,7 +130,7 @@ Windows 本地漫画查重桌面程序。**纯本地离线运行**，专门解�
 > 想要**单文件 exe**（只有一个文件、更好管理）可以自己打：
 > `python -m PyInstaller --onefile --noconsole --noconfirm --name ComicDedupTool-onefile
 > --collect-submodules comicdedup --hidden-import PySide6 comic_dedup.py`
-> 代价是每次启动要把约 260MB 解压到临时目录（等 5~10 秒），而且更容易被杀软误报（见下）。
+> 代价是每次启动要把约 260MB 解压到临时目录（等 5~10 秒），且更容易被杀软误报。
 
 ### ⚠️ 关于杀软误报（务必先看这条）
 

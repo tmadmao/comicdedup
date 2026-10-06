@@ -379,13 +379,14 @@ class ScanWorker:
                 except Exception:
                     thumb = ""
 
-            data = self._read_members(bk, names, want)
-            feats, blanks, failed = [], 0, 0
+            data, read_note = self._read_members(bk, names, want)
+            feats, blanks, failed, no_bytes = [], 0, 0, 0
             for idx in want:
                 nm = names[idx]
                 buf = data.get(nm)
                 if not buf:
                     failed += 1
+                    no_bytes += 1
                     continue
                 f = core.page_feature(buf, idx, do_deskew=s.do_deskew, crop_mode=s.crop_mode)
                 if f is None:
@@ -397,9 +398,17 @@ class ScanWorker:
                                           n_img, len(feats), blanks, s.crop_mode, thumb=thumb)
             self.cache.put_pages(book_id, feats)
             if failed:
-                self._say(f"{b.path.name}：{failed} 张图片解码失败已跳过", "warn")
+                self._say(f"{b.path.name}：{failed} 张读取/解码失败已跳过", "warn")
             if not feats:
-                return book_id, n_img, [], blanks, thumb, "抽样页全部解码失败"
+                # ⚠ 区分「抽取阶段就没拿到字节」和「拿到了但图片解不开」—— 以前两种情况
+                # 都报「抽样页全部解码失败」，排查时看不出根因。真实案例：某 7z 的成员名
+                # 被按错编码解成乱码，坏名字再拿去解压必然抽不到，却报成了"解码失败"。
+                if want and no_bytes == len(want):
+                    why = (f"抽样 {len(want)} 页全部抽取失败（压缩包成员本来就读不出来；"
+                           f"常见原因：成员名编码不兼容、加密、数据损坏）")
+                    return book_id, n_img, [], blanks, thumb, why + (f"｜{read_note}" if read_note else "")
+                return book_id, n_img, [], blanks, thumb, \
+                    f"抽样 {len(want)} 页全部解码失败（{failed} 张读到了但解不开）"
             return book_id, n_img, feats, blanks, thumb, ""
         finally:
             try:
@@ -407,34 +416,42 @@ class ScanWorker:
             except Exception:
                 pass
 
-    def _read_members(self, bk, names: Sequence[str], want: Sequence[int]) -> dict:
+    def _read_members(self, bk, names: Sequence[str], want: Sequence[int]) -> tuple:
         """把要抽的页一次读进内存。
+
+        返回 ``(名字 -> bytes|None, 失败说明)``。第二个返回值专门用来把
+        「抽取阶段就没拿到字节」和「拿到了但图片解不开」区分开 —— 调用方靠它给出
+        可诊断的失败原因，而不是笼统的"解码失败"。
 
         外部解压程序一次调用抽完（而不是每张一次），zip/rarfile 走随机访问。
         """
         targets = [names[i] for i in want]
         out: dict = {}
+        note = ""
         if isinstance(bk, A.ZipBackend) or isinstance(bk, A._RarfileBackend):
             for n in targets:
                 try:
                     out[n] = bk.read(n)
-                except Exception:
+                except Exception as e:
                     out[n] = None
+                    note = note or f"{type(e).__name__}: {e}"
         else:
             try:
                 got = bk.read_many(targets)
             except Exception as e:
-                self._say(f"批量抽取失败，改逐张读取：{e}", "warn")
                 got = {}
+                note = note or f"批量抽取失败 {type(e).__name__}: {e}"
+                self._say(f"批量抽取失败，改逐张读取：{e}", "warn")
             for n in targets:
                 buf = got.get(n)
                 if not buf:
                     try:
                         buf = bk.read(n)
-                    except Exception:
+                    except Exception as e:
                         buf = None
+                        note = note or f"逐张抽取失败 {type(e).__name__}: {e}"
                 out[n] = buf
-        return out
+        return out, note
 
     # ---------------- 文件夹
     def _scan_folder(self, b: A.BookEntry):

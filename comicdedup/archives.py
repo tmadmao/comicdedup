@@ -123,6 +123,62 @@ def _run(cmd: list, **kw) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, creationflags=creationflags, **kw)
 
 
+def _console_encodings() -> tuple:
+    """外部解压程序输出文本时可能用的编码，按可能性排序。
+
+    ⚠ 这是本项目一个**真实的静默漏判来源**：7z 与 UnRAR 都不是按 UTF-8 往管道写字，
+    而是按**控制台 / OEM 代码页**（中文 Windows 上是 cp936 / GBK）。
+    以前这里一律 ``decode("utf-8", "replace")``，于是包内非 ASCII 的成员名全被解成
+    U+FFFD；而这个坏名字又被原样当参数传回去解压 —— 抽不到页。
+    实测：一个 223 页、文件名带特殊字符的 7z 因此整本 0 页特征，永远参与不了比对。
+    """
+    cands = ["utf-8"]
+    if os.name == "nt":
+        try:
+            import ctypes
+            k32 = ctypes.windll.kernel32
+            for fn in ("GetConsoleOutputCP", "GetOEMCP", "GetACP"):
+                try:
+                    cp = int(getattr(k32, fn)())
+                except Exception:
+                    continue
+                if cp:
+                    cands.append(f"cp{cp}")
+        except Exception:
+            pass
+    cands += ["cp936", "gbk", "big5", "shift_jis", "cp1252"]
+    seen, out = set(), []
+    for c in cands:
+        if c.lower() not in seen:
+            seen.add(c.lower())
+            out.append(c)
+    return tuple(out)
+
+
+def _decode_console(raw: bytes) -> str:
+    """解码外部程序的文本输出（列目录结果、报错信息）。
+
+    先试**严格** UTF-8：给 7z 加了 ``-sccUTF-8`` 之后它输出的就是 UTF-8，
+    这条会直接命中，成员名能被精确还原；不是 UTF-8 时再按系统代码页依次回退
+    （UnRAR 没有强制 UTF-8 输出的开关，只能靠回退）。
+    最后用 replace 兜底，保证任何异常输出都不会让程序崩。
+    """
+    if not raw:
+        return ""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    for enc in _console_encodings():
+        if enc.lower() == "utf-8":
+            continue
+        try:
+            return raw.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("utf-8", "replace")
+
+
 # ------------------------------------------------------------------ 后端探测
 
 _TOOLS: dict = {}
@@ -161,7 +217,7 @@ def available_backends() -> dict:
     if _TOOLS.get("bsdtar"):
         try:
             r = _run([_TOOLS["bsdtar"], "--version"], timeout=10)
-            out = (r.stdout or b"").decode("utf-8", "replace").lower()
+            out = _decode_console(r.stdout or b"").lower()
             if "bsdtar" not in out and "libarchive" not in out:
                 _TOOLS["bsdtar"] = None
         except Exception:
@@ -291,17 +347,31 @@ class ExternalBackend:
 
     def _list_cmd(self) -> list:
         if self.tool_key == "sevenzip":
-            return [self.tool, "l", "-slt", "-ba", "--", str(self.path)]
+            # `-sccUTF-8`：强制 7z 用 UTF-8 输出控制台文本。**必须加** ——
+            # 实测 7z 默认按控制台代码页（中文 Windows 上是 cp936/GBK）输出成员名，
+            # 我们按 UTF-8 解就会把非 ASCII 名字全解成乱码，而名字还要拿去解压。
+            return [self.tool, "l", "-slt", "-ba", "-sccUTF-8", "--", str(self.path)]
         if self.tool_key == "unrar":
             return [self.tool, "l", "-c-", "--", str(self.path)]
         # bsdtar 必须用 -tvf（详细列表）才带成员大小 —— 没有大小就无法把
         # 「一次调用抽多个成员」的首尾相接输出切开
         return [self.tool, "-tvf", str(self.path)]
 
+    def _list_cmd_noflag(self) -> list:
+        """不带 ``-sccUTF-8`` 的 7z 列目录命令（给老版本 7-Zip 兜底）。"""
+        return [self.tool, "l", "-slt", "-ba", "--", str(self.path)]
+
     def list_images(self) -> list:
         r = _run(self._list_cmd())
-        out = (r.stdout or b"").decode("utf-8", "replace")
-        err = (r.stderr or b"").decode("utf-8", "replace")
+        raw = r.stdout or b""
+        # 老版本 7-Zip 可能不认 -sccUTF-8（报 "Incorrect switch"）：去掉它重试一次，
+        # 此时靠 _decode_console 的代码页回退来还原成员名。
+        if (self.tool_key == "sevenzip" and r.returncode not in (0, 1)
+                and b"scc" in (r.stderr or b"")):
+            r = _run(self._list_cmd_noflag())
+            raw = r.stdout or b""
+        out = _decode_console(raw)
+        err = _decode_console(r.stderr or b"")
         if r.returncode not in (0, 1) and not out.strip():
             raise ArchiveError(f"列目录失败：{err.strip()[:200]}")
         names: list = []
@@ -359,7 +429,7 @@ class ExternalBackend:
         r = _run(self._extract_cmd(names), stdout=subprocess.PIPE)
         blob = r.stdout or b""
         if not blob:
-            err = (r.stderr or b"").decode("utf-8", "replace")
+            err = _decode_console(r.stderr or b"")
             raise ArchiveError(f"抽取失败：{err.strip()[:200]}")
         out = {}
         pos = 0
