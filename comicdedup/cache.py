@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 import time
@@ -26,6 +27,8 @@ from typing import Iterable, Optional, Sequence
 
 from . import __version__, data_dir
 from .core import FEAT_VER, TILE, TILE_SMALL
+
+log = logging.getLogger("comicdedup")
 
 DB_NAME = "comics.sqlite"
 
@@ -211,7 +214,12 @@ class FeatureCache:
     # -------------------------------------------------- 读取（分组用）
 
     def all_pages(self, need_tile: bool = False) -> list:
-        """读出所有页特征。返回 [(book_path, book_id, page_row_dict), ...]。"""
+        """读出所有页特征。返回 [(book_path, book_id, page_row_dict), ...]。
+
+        只读**当前特征算法版本**（``FEAT_VER``）的书 —— 缓存里可能还残留旧版本的
+        特征（比如采样方式改版后旧缓存没清），若把新旧两套一起读进来，同一本书会
+        因为「旧版本特征 + 新版本特征」并存而自己跟自己判重。
+        """
         cols = "p.idx,p.phash,p.bhash32,p.aspect,p.std,p.ink,p.px,p.blank,p.map16"
         if need_tile:
             cols += ",p.tile"
@@ -220,14 +228,15 @@ class FeatureCache:
                 f"SELECT b.path AS bpath, b.id AS bid, b.size AS bsize, b.pages AS bpages, "
                 f"b.kind AS bkind, b.fmt AS bfmt, b.status AS bstatus, {cols} "
                 f"FROM pages p JOIN books b ON b.id=p.book_id "
-                f"WHERE p.blank=0 AND b.status='ok' ORDER BY b.id, p.idx").fetchall()
+                f"WHERE p.blank=0 AND b.status='ok' AND b.feat_ver=? "
+                f"ORDER BY b.id, p.idx", (FEAT_VER,)).fetchall()
         return [dict(r) for r in rows]
 
     def book_meta(self) -> list:
         with self._lock:
             rows = self.conn.execute(
                 "SELECT id,path,kind,fmt,size,mtime,pages,sampled,blanks,thumb,status,error "
-                "FROM books ORDER BY path").fetchall()
+                "FROM books WHERE feat_ver=? ORDER BY path", (FEAT_VER,)).fetchall()
         return [dict(r) for r in rows]
 
     def tiles_for_books(self, book_ids: Sequence[int]) -> dict:
@@ -245,7 +254,8 @@ class FeatureCache:
                 f"SELECT p.book_id, p.idx, p.tile, p.map16, p.phash, p.px "
                 f"FROM pages p JOIN books b ON b.id=p.book_id "
                 f"WHERE p.book_id IN ({q}) AND p.blank=0 AND b.status='ok' "
-                f"ORDER BY p.book_id, p.idx", tuple(book_ids)).fetchall()
+                f"AND b.feat_ver=? "
+                f"ORDER BY p.book_id, p.idx", tuple(book_ids) + (FEAT_VER,)).fetchall()
         out: dict = {}
         for r in rows:
             out.setdefault(int(r["book_id"]), []).append(
@@ -258,9 +268,14 @@ class FeatureCache:
     def stats(self) -> dict:
         with self._lock:
             b = self.conn.execute("SELECT COUNT(*) c, COALESCE(SUM(pages),0) p, "
-                                  "COALESCE(SUM(sampled),0) s FROM books").fetchone()
-            pg = self.conn.execute("SELECT COUNT(*) c FROM pages").fetchone()
-            err = self.conn.execute("SELECT COUNT(*) c FROM books WHERE status!='ok'").fetchone()
+                                  "COALESCE(SUM(sampled),0) s FROM books WHERE feat_ver=?",
+                                  (FEAT_VER,)).fetchone()
+            pg = self.conn.execute(
+                "SELECT COUNT(*) c FROM pages p JOIN books b ON b.id=p.book_id "
+                "WHERE b.feat_ver=?", (FEAT_VER,)).fetchone()
+            err = self.conn.execute(
+                "SELECT COUNT(*) c FROM books WHERE status!='ok' AND feat_ver=?",
+                (FEAT_VER,)).fetchone()
         return {"books": b["c"], "pages": b["p"], "sampled": b["s"],
                 "page_rows": pg["c"], "bad": err["c"], "db": str(self.path)}
 
@@ -277,6 +292,16 @@ class FeatureCache:
 
     def start_scan(self, root: str) -> int:
         with self._lock:
+            # 清掉**非当前特征版本**的旧特征：算法/采样改版后（feat_ver 升级），
+            # 旧缓存对新版本毫无用处，只会占空间、还可能被误读（见 all_pages 的说明）。
+            # 删除前先看看有没有残留，有就一并清掉。
+            n_old = self.conn.execute(
+                "SELECT COUNT(*) c FROM books WHERE feat_ver != ?", (FEAT_VER,)).fetchone()["c"]
+            if n_old:
+                self.conn.execute("DELETE FROM pages WHERE book_id IN "
+                                  "(SELECT id FROM books WHERE feat_ver != ?)", (FEAT_VER,))
+                self.conn.execute("DELETE FROM books WHERE feat_ver != ?", (FEAT_VER,))
+                log.info("清掉旧特征版本的缓存 %d 本（feat_ver 已升级）", n_old)
             cur = self.conn.execute("INSERT INTO scans(root,started_at) VALUES(?,?)",
                                     (root, time.time()))
             self.conn.commit()
