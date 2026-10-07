@@ -1016,6 +1016,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_del.setEnabled(True)
         ok, bad = len(res.get("moved", [])), len(res.get("failed", []))
         self.logline("info", f"删除完成：成功 {ok} 项，失败 {bad} 项")
+        # 关键：把已删掉的书从缓存里一并移除 —— 否则「重新分组」读到的还是旧数据，
+        # 已删的书会继续出现在结果里。文件是移进回收站，不是真的没了，
+        # 所以必须靠「源路径已不存在」这个事实来驱动缓存清理。
+        moved_paths = [p for p, _msg in res.get("moved", [])]
+        removed = 0
+        if moved_paths:
+            removed = self.cache.remove_books(moved_paths)
+            self.logline("info", f"已从缓存移除 {removed} 本已删除的记录")
         try:
             lp = data_dir() / "删除记录.csv"
             rows = list(res.get("log", []))
@@ -1031,7 +1039,8 @@ class MainWindow(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.information(
             self, "删除结果",
             f"成功移出 {ok} 项，失败 {bad} 项。\n\n"
-            f"清单里已删掉的项仍会列在结果中，点「重新分组」即可刷新。")
+            f"已从缓存移除 {removed} 本，并自动重新分组——剩余结果已刷新。")
+        self._refresh_cache_info()
         self.on_regroup(silent=True)
 
 

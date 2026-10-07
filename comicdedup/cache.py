@@ -376,6 +376,27 @@ class FeatureCache:
             self.conn.commit()
             self.conn.execute("VACUUM")
 
+    def remove_books(self, paths: Sequence[str]) -> int:
+        """把若干本书（连同页特征）从缓存里移除，返回实际移除的条数。
+
+        用于「删除文件后」：文件已移进回收站，缓存里对应的记录必须一并删掉，
+        否则下次分组还会把这些已不存在的书读进来、按旧数据判重。
+        路径会先走 :func:`norm_path` 归一，避免盘符 / UNC 写法差异导致删不掉。
+        """
+        n = 0
+        with self._lock:
+            for p in paths:
+                np_ = norm_path(p)
+                row = self.conn.execute("SELECT id FROM books WHERE path=?",
+                                        (np_,)).fetchone()
+                if row is None:
+                    continue
+                self.conn.execute("DELETE FROM pages WHERE book_id=?", (row["id"],))
+                self.conn.execute("DELETE FROM books WHERE id=?", (row["id"],))
+                n += 1
+            self.conn.commit()
+        return n
+
     def start_scan(self, root: str) -> int:
         with self._lock:
             # 清掉**非当前特征版本**的旧特征：算法/采样改版后（feat_ver 升级），
