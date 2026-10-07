@@ -124,10 +124,9 @@ Windows 本地漫画查重桌面程序。**纯本地离线运行**，专门解�
 **普通用户下载上面的 zip**，解压 → 双击文件夹里的 `ComicDedupTool.exe` 即可，
 不用装 Python、不用装任何依赖（压缩包大小见上表，解开后约 265 MB）。
 
-> 📝 **v1.2.0（2026-10-07）**：详情页改为**成链对比**——左右并排显示两个版本的对应页，
-> 点哪一对看哪一对，人工核对更直观。另外缩略图改存数据库（不再批量生成图片文件，
-> 消除被杀软误判「敲诈病毒」的行为指纹），并修复盘符被展开成 UNC 导致缓存对不上的问题。
-> 详见 [CHANGELOG](https://github.com/tmadmao/comicdedup/blob/main/CHANGELOG.md)。
+> 📝 **v1.2.1（2026-10-07）**：修复「删除文件后缓存不同步」——勾选删除后自动移除对应缓存记录
+> 并刷新分组，被删掉的书不再出现在结果里。此前的 v1.2.0 改成链对比、缩略图入库、
+> 盘符归一。详见 [CHANGELOG](https://github.com/tmadmao/comicdedup/blob/main/CHANGELOG.md)。
 
 > **7z / rar 的解压需要装 [7-Zip](https://www.7-zip.org/) 或 WinRAR**（zip 不需要）。
 > 也可以把 `7z.exe` 直接放到 exe 同目录，程序会自动识别。
