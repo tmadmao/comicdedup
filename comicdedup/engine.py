@@ -27,11 +27,10 @@ from bisect import bisect_left
 from collections import deque
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Callable, Iterable, Optional, Sequence
+from typing import Callable, Optional, Sequence
 
 import numpy as np
 
-from . import data_dir
 from . import archives as A
 from . import core
 from .cache import FeatureCache
@@ -567,11 +566,19 @@ def read_page_image(path: str, idx: int, max_side: int = 560) -> Optional[bytes]
                 return None
             data = files[idx].read_bytes()
         else:
+            # 必须显式关掉：界面里每点一对内页就会开一次压缩包，
+            # 不关的话 ZipBackend / py7zr 的句柄会一路泄漏（反复点击能攒出上百个）。
             be = A.open_book(p)
-            names = be.list_images()
-            if not (0 <= idx < len(names)):
-                return None
-            data = be.read(names[idx][0])
+            try:
+                names = be.list_images()
+                if not (0 <= idx < len(names)):
+                    return None
+                data = be.read(names[idx][0])
+            finally:
+                try:
+                    be.close()
+                except Exception:
+                    pass
     except Exception:
         return None
     if not data:
@@ -1123,8 +1130,13 @@ CSV_HEADER = ["组号", "建议保留", "单行本名称", "载体", "格式", "
               "关系", "完整路径"]
 
 
-def export_csv(groups: Sequence[Group], path: Path, root: Optional[Path] = None) -> int:
-    """导出重复清单 CSV（含路径、页数、相似度）。返回写入行数。"""
+def export_csv(groups: Sequence[Group], path: Path) -> int:
+    """导出重复清单 CSV（含路径、页数、相似度）。返回写入行数。
+
+    ⚠ 这里**只有一列路径**，写的是完整路径（与表头「完整路径」一致）。
+    早期版本还有一个 `root` 参数，用来把路径换成相对路径 —— 但那个值算了之后
+    从来没写进任何一列（列里只有书名和完整路径），是个纯误导的死参数，v1.2.2 删掉。
+    """
     n = 0
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1133,12 +1145,6 @@ def export_csv(groups: Sequence[Group], path: Path, root: Optional[Path] = None)
         w.writerow(CSV_HEADER)
         for g in groups:
             for m in g.members:
-                rel = str(m.path)
-                if root:
-                    try:
-                        rel = str(Path(m.path).relative_to(root))
-                    except Exception:
-                        rel = str(m.path)
                 w.writerow([g.gid, "★保留" if m.keep else "", Path(m.path).name,
                             "文件夹" if m.kind == "folder" else "压缩包", m.fmt,
                             m.size, core.human_size(m.size), m.pages, m.sampled,

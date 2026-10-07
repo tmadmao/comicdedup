@@ -235,7 +235,7 @@ def cmd_scan(a) -> int:
             f"异常 {st.n_bad}   {Path(path).name[:40]:<40}".rstrip())
 
     worker.on_progress = prog
-    st = worker.run()
+    worker.run()          # 扫描汇总由 worker 自己写日志（上面那行进度是实时刷新的）
     say("")
     if worker.errors:
         say(f"* 跳过 {len(worker.errors)} 本（前 10 条）：")
@@ -267,7 +267,7 @@ def cmd_scan(a) -> int:
         say(f"\n...另有 {len(groups) - a.show} 组，见 CSV")
 
     if a.csv:
-        n = export_csv(groups, Path(a.csv), root=root)
+        n = export_csv(groups, Path(a.csv))
         say(f"\n[OK] 重复清单已导出：{a.csv}（{n} 行）")
     cache.close()
     say(f"\n总耗时 {time.time() - t0:.1f} 秒")
@@ -623,7 +623,7 @@ def cmd_verify(a) -> int:
         say("  [FAIL] 无关漫画被误并进重复组")
     # 导出 CSV
     csvp = tmp / "dup.csv"
-    n = export_csv(groups, csvp, root=root)
+    n = export_csv(groups, csvp)
     say(f"  CSV 导出行数 {n}")
     cache.close()
     say(f"== 验证结束：通过 {ok} 项，失败 {fail} 项 ==")

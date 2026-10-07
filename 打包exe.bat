@@ -50,8 +50,9 @@ if errorlevel 1 goto FAIL
 echo.
 echo ============================================================
 echo   打包完成，dist\ 里有两样东西：
-echo     dist\ComicDedupTool\                  文件夹版（推荐）
-echo     dist\ComicDedupTool-v1.0.0-win64.zip  上面这个的压缩包
+echo     dist\ComicDedupTool\                       文件夹版（推荐）
+echo     dist\ComicDedupTool-v当前版本-win64.zip    上面这个的压缩包
+echo     （zip 的版本号取自 comicdedup\__init__.py 的 __version__，不必手改）
 echo.
 echo   为什么默认发文件夹版而不是单文件 exe：
 echo     1) 单文件每次启动都要把 ~260MB 依赖解压到临时目录，双击后要等 5~10 秒；

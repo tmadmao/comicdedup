@@ -19,7 +19,6 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -461,7 +460,6 @@ class MainWindow(QtWidgets.QMainWindow):
         return "很严格：基本只认同源文件，跨版本扫描/DL 容易漏"
 
     def on_preset(self, name: str):
-        a, w, m = PRESETS.get(name, PRESETS["标准"])
         self.lb_preset.setText(PRESET_HELP.get(name, ""))
         self.lb_preset.setToolTip(PRESET_HELP.get(name, ""))
 
@@ -956,7 +954,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not fn:
             return
         try:
-            n = export_csv(self.groups, Path(fn), root=self.root)
+            n = export_csv(self.groups, Path(fn))
             self.logline("info", f"已导出 {n} 行到 {fn}")
             QtWidgets.QMessageBox.information(self, "导出完成", f"已写入 {n} 行：\n{fn}")
         except Exception as e:

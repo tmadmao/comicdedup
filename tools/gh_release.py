@@ -32,7 +32,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 OWNER, REPO = "tmadmao", "comicdedup"
 API = "https://api.github.com"
-DEFAULT_VERSION = "v1.0.0"
+DEFAULT_VERSION = "v1.2.2"
 
 REPO_DESC = ("Windows 本地漫画查重工具：扫描 zip/rar/7z/图片文件夹构成的单行本，"
              "识别重复组（含「自制扫描版 vs 官方 DL 版」）。纯离线运行，不联网不上传，"
@@ -106,6 +106,15 @@ def build_body(version: str, assets: list) -> str:
     )
     return f"""## 漫画查重 ComicDedup {version}
 
+> ### ⏹ 这是最后一个版本：项目已无限期停止开发
+>
+> 本工具已在真实书库上跑通并长期使用（3069 本单行本 / 约 10.7 万页，放在 NAS 上）。
+> **因没有新的具体需求，自 2026-10-08 起无限期停止开发**：不再有新功能、不再更新下载包。
+> 本版只做发布前全面审计的修订，**算法、判据与缓存格式与 v1.2.1 完全一致**
+> （旧缓存可直接复用，不需要重扫）。
+> 仓库保持公开可读，可自由 fork、修改与二次开发（MIT）。
+> 功能边界与已知取舍见 [docs/PROJECT-STATUS.md](https://github.com/tmadmao/comicdedup/blob/main/docs/PROJECT-STATUS.md)。
+
 Windows 本地漫画查重桌面程序。**纯本地离线运行**，专门解决「几千本单行本里
 哪些是同一本书的重复版本」，尤其能识别最难的一类：**同一本漫画，一份是自制书本扫描版、
 另一份是官方 DL 电子版**。
@@ -122,11 +131,14 @@ Windows 本地漫画查重桌面程序。**纯本地离线运行**，专门解�
 {rows}
 
 **普通用户下载上面的 zip**，解压 → 双击文件夹里的 `ComicDedupTool.exe` 即可，
-不用装 Python、不用装任何依赖（压缩包大小见上表，解开后约 265 MB）。
+不用装 Python、不用装任何依赖（压缩包大小见上表，解开后约 267 MB）。
 
-> 📝 **v1.2.1（2026-10-07）**：修复「删除文件后缓存不同步」——勾选删除后自动移除对应缓存记录
-> 并刷新分组，被删掉的书不再出现在结果里。此前的 v1.2.0 改成链对比、缩略图入库、
-> 盘符归一。详见 [CHANGELOG](https://github.com/tmadmao/comicdedup/blob/main/CHANGELOG.md)。
+> 📝 **v1.2.2（2026-10-08，收尾版）**：修掉界面「成链对比」翻页时的文件句柄泄漏；
+> 删除 `export_csv()` 里从未生效的 `root` 参数；把两个一跑就崩的开发探针按现行 API 重写、
+> 修正 `probe_align.py` 与出厂配置相反的默认裁剪模式；移除一个把私人书库文件名
+> 写进仓库的探针里的真实路径；README 里过期的验证项数（自检 23→26、界面回归 37→38、
+> 打包版 22+1→25+1）与隐私表述一并校正。详见
+> [CHANGELOG](https://github.com/tmadmao/comicdedup/blob/main/CHANGELOG.md)。
 
 > **7z / rar 的解压需要装 [7-Zip](https://www.7-zip.org/) 或 WinRAR**（zip 不需要）。
 > 也可以把 `7z.exe` 直接放到 exe 同目录，程序会自动识别。
@@ -151,7 +163,8 @@ Windows 本地漫画查重桌面程序。**纯本地离线运行**，专门解�
   两版之间的错位搜出来。详见下方标定数据。
 - **特征缓存**：SQLite 缓存每本的页特征，第二次扫描是秒级。
 - **人工确认**：每项带复选框（默认不勾），删除必须勾选 + 二次弹窗确认，
-  且**只移入回收站**（代码内没有任何 `rmtree` / `os.remove`）。
+  且**只移入回收站**（处理用户文件的代码路径里不出现 `rmtree` / `os.remove` / `unlink`；
+  只有程序自己的缩略图缓存目录与自检临时库会被清理）。
 - **导出清单**：一键导出 CSV（路径 / 页数 / 相似度），方便存档核对。
 
 ### 🔒 隐私
@@ -198,7 +211,9 @@ Windows 本地漫画查重桌面程序。**纯本地离线运行**，专门解�
 
 ### ✅ 验证
 
-`--selftest` 23 项、`--verify` 3 项、界面回归 37 项，全部通过（可复现）。
+`--selftest` 26 项、`--verify` 3 项、界面回归 38 项，全部通过（可复现）。
+打包版 `ComicDedupTool.exe --selftest`：25 项通过 + 1 项 SKIP（SKIP 的是
+「源码零网络调用」，exe 里没有 `.py` 源码，只能显式跳过而不是记成通过）。
 
 ### 🔒 校验（SHA256）
 

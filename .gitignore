@@ -42,6 +42,7 @@ _tmp/
 *.tmp
 tools/_debug_*.png
 tools/_dbg*.py
+tools/_pairs*.json
 tools/_sweep.py
 
 # ---- 学习用参考项目（第三方仓库，只读参考，不分发）----

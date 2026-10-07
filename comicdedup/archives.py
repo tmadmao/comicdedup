@@ -21,7 +21,6 @@ rar        ``rarfile`` → ``UnRAR.exe`` → ``7z.exe`` → ``bsdtar``
 
 from __future__ import annotations
 
-import io
 import os
 import re
 import shutil
@@ -30,7 +29,7 @@ import sys
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Optional, Sequence
+from typing import Optional, Sequence
 
 ZIP_EXT = {".zip", ".cbz"}
 RAR_EXT = {".rar", ".cbr"}
@@ -191,11 +190,11 @@ def available_backends() -> dict:
     _TOOLS["sevenzip"] = find_tool(["7z", "7za", "7zz"])
     _TOOLS["unrar"] = find_tool(["UnRAR", "unrar"])
     _TOOLS["rar"] = find_tool(["Rar", "rar"])
-    # Windows 自带 C://Windows//System32//tar.exe 就是 bsdtar(libarchive)，
+    # Windows 自带 C:\Windows\System32\tar.exe 就是 bsdtar(libarchive)，
     # 优先直接探测它 —— 否则 PATH 里的 GNU tar（Git Bash 自带）会先被找到，
     # 而 GNU tar 读不了 7z/rar。
     bsdtar = None
-    windir = os.environ.get("WINDIR") or r"C://Windows"
+    windir = os.environ.get("WINDIR") or r"C:\Windows"
     for cand in (Path(windir) / "System32" / "tar.exe", Path(windir) / "System32" / "bsdtar.exe"):
         if cand.exists():
             bsdtar = str(cand)

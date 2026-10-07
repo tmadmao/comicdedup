@@ -1,5 +1,16 @@
 # 漫画查重（ComicDedup）
 
+> ## ⏹ 项目状态：已无限期停止开发
+>
+> 本工具已在真实书库上跑通并长期使用（3069 本单行本 / 约 10.7 万页，放在 NAS 上），
+> 重复组识别、人工核对、移入回收站这条链路全部实际跑过。
+> **因没有新的具体需求，本项目自 2026-10-08 起无限期停止开发**：不再有新功能、不再更新下载包。
+> v1.2.2 是**收尾版本**，只做发布前全面审计的修订（文档与开发探针为主），
+> **算法、判据与缓存格式与 v1.2.1 完全一致**。仓库保持公开可读，可自由 fork、修改与二次开发（MIT）。
+>
+> - 收尾版本改了什么 → [`CHANGELOG.md`](CHANGELOG.md)
+> - 功能边界、已知取舍与维护状态 → [`docs/PROJECT-STATUS.md`](docs/PROJECT-STATUS.md)
+
 Windows 本地漫画查重桌面程序。**纯本地离线运行**，专门解决「几千本单行本里哪些是同一本书的重复版本」，
 尤其能识别最难的一类：**同一本漫画，一份是自制书本扫描版、另一份是官方 DL 电子版**。
 
@@ -74,7 +85,7 @@ Windows 本地漫画查重桌面程序。**纯本地离线运行**，专门解�
 | **压缩包不落地解压** | 图片在内存中读取解码，用完即弃；不往临时目录写文件 |
 | **不做 OCR** | 只用分镜图像特征（灰度墨迹分布 + 感知哈希），完全不涉及文字识别 |
 | **绝不自动删除** | 每条结果都带复选框、默认不勾；删除必须人工勾选 + **二次弹窗确认** |
-| **绝不永久删除** | 优先移入系统回收站；回收站不可用时**移动到**同目录 `_漫画查重回收站\`；代码里没有任何 `rmtree` / `os.remove` / `unlink` |
+| **绝不永久删除** | 优先移入系统回收站；回收站不可用时**移动到**同目录 `_漫画查重回收站\`；**处理用户文件的代码路径里没有任何永久删除调用**（`rmtree` / `os.remove` / `unlink` 一律不出现）。唯一的例外是两处**程序自己的**临时物：内部缩略图缓存目录 `thumbs\`（清缓存时整体删掉，里面的文件只由本程序生成）与自检用的 `selftest.sqlite` |
 | **可追溯** | 每次删除都写 `删除记录.csv`（时间 / 对象 / 结果 / 说明） |
 
 ---
@@ -84,7 +95,7 @@ Windows 本地漫画查重桌面程序。**纯本地离线运行**，专门解�
 ### 方式 A：直接用打包版（推荐给不想装 Python 的人）
 
 到 [Releases](https://github.com/tmadmao/comicdedup/releases) 下载
-`ComicDedupTool-v1.1.0-win64.zip`（约 105 MB，解开后约 259 MB）：
+`ComicDedupTool-v1.2.2-win64.zip`（约 109 MB，解开后约 267 MB）：
 
 ```
 解压 → 双击文件夹里的 ComicDedupTool.exe → 选漫画根目录 → 开始扫描
@@ -395,15 +406,17 @@ UTF-8 带 BOM（Excel 直接双击不乱码）。
 
 | 测试 | 命令 | 结果 |
 | --- | --- | --- |
-| 自检 | `python comic_dedup.py --selftest` | **23 项全过**（环境 / 后端 / 预处理 / 采样 / 隐私静态检查 / 缓存 / 可分性） |
+| 自检 | `python comic_dedup.py --selftest` | **26 项全过**（环境 / 后端 / 预处理 / 采样 / 隐私静态检查 / 缓存 / 可分性） |
 | 端到端验证 | `python comic_dedup.py --verify` | **3 项全过**（扫描版+DL版归类、改名副本归类、无关漫画不误并） |
-| 界面回归（off-screen 无窗口） | `python tools/gui_smoketest.py` | **37 项全过**（渲染 / 筛选 / 勾选 / 详情 / 保留项 / CSV / 滑块 / 线程参数快照 / 删除安全） |
+| 界面回归（off-screen 无窗口） | `python tools/gui_smoketest.py` | **38 项全过**（渲染 / 筛选 / 勾选 / 详情 / 保留项 / CSV / 滑块 / 线程参数快照 / 删除安全） |
 | 并发正确性 | `python tools/probe_concurrency.py 6` | **全部通过**：单线程与 6 线程导出的 CSV **逐字节一致**，分组结论一致，缓存无残缺书、无重复页键 |
 | 暂停 / 停止 | `python tools/probe_pause.py 4` | **全部通过**：暂停期间零推进、停止 1.2 秒内返回、且不留「有记录零页」的残缺书 |
+| 成员名编码 | `python tools/probe_specialnames.py` | **全部通过**：中日文 + `# & % 〜 [ ]` + 空格的成员名，zip / 7z / rar 三种格式名字与字节内容都正确 |
 | 线程加速比 | `python tools/probe_threadspeed.py 240` | 32~34 → 8~14 ms/页（空闲机器上 ≈4.1x） |
+| 阈值标定 | `python tools/probe_align.py 24` | 同页/异页分数分布与多页投票模拟（默认即出厂裁剪模式） |
 | 真实语料端到端 | `python tools/make_testdata.py` 后 `--scan` | 见下 |
 
-> 打包成 exe 后再跑 `ComicDedupTool.exe --selftest`：**22 项通过 + 1 项 SKIP**，
+> 打包成 exe 后再跑 `ComicDedupTool.exe --selftest`：**25 项通过 + 1 项 SKIP**，
 > 退出码 0。SKIP 的是「源码零网络调用」—— 那一项靠读 `.py` 文件做静态检查，
 > 而 exe 里只有字节码、没有源码，空跑必须显式标成 SKIP 而不是记成通过（假通过更危险）。
 > 同组的「删除函数里没有永久删除调用」在 exe 里仍然有效：读不到源码时
@@ -469,11 +482,14 @@ comicdedup/
 tools/
   make_testdata.py          生成测试语料（随机分镜版式 + 扫描退化 + DL 变体）
   probe_align.py            阈值标定探针（同页/异页分数分布、多页投票模拟）
-  probe_pair.py             裁剪对齐诊断（逐页打印裁框与宽高比）
-  probe_visual.py           预处理各阶段对比图（肉眼核对）
+  probe_pair.py             裁剪对齐诊断（逐页打印裁框、宽高比、倾斜角）
+  probe_visual.py           预处理各阶段对比图（肉眼核对，输出 tools/_debug_stages.png）
   probe_concurrency.py      并发正确性：单线程 vs 多线程结果必须逐字节一致
   probe_threadspeed.py      特征提取吞吐与线程加速比（含 OpenCV 内部线程的贡献隔离）
   probe_pause.py            多线程下的暂停 / 恢复 / 停止行为回归
+  probe_specialnames.py     压缩包成员名编码回归（中日文 + 特殊字符，zip/7z/rar）
+  probe_name_truth.py       用文件名当真值代理量召回率（需自备真实库与分组 CSV）
+  probe_sampling_ab.py      块采样 vs 稀疏采样对照（书对由命令行 / 本地 JSON 传入）
   gui_smoketest.py          界面回归（off-screen 无窗口）
   make_screenshots.py       生成 README 用的真实界面截图（离屏渲染 + 真实语料）
   make_flow_image.py        生成 README 用的核心算法流程图（PIL 绘制）
@@ -481,11 +497,12 @@ tools/
   probe_console_attach.py   探测窗口版 exe 的控制台输出行为（打包验证用）
   gh_release.py             发布到 GitHub Releases + 设置仓库简介与话题（走 REST API）
 docs/
+  PROJECT-STATUS.md         项目状态 / 功能边界 / 已知取舍（随仓库分发）
   ui-main.png               README 主界面截图（程序真实渲染）
   ui-groups.png             重复组列表特写
   algorithm-flow.png        核心算法流程图
 安装依赖.bat / 运行工具.bat / 打包exe.bat
-requirements.txt / LICENSE / README.md
+requirements.txt / LICENSE / README.md / CHANGELOG.md
 ```
 
 > README 里的截图不是手画的示意图，而是 `python tools/make_screenshots.py` 用**真实的界面代码**离屏渲染出来的

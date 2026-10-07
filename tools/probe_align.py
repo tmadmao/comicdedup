@@ -1,17 +1,23 @@
 """标定探针：用 core 的最终流水线测「同页(扫描版vs官方DL版)」与「异页」的可分性。
 
 用法：
-    python tools/probe_align.py 24 --mode=mass
-    python tools/probe_align.py 24 --mode=bed
+    python tools/probe_align.py 24                    # 出厂默认裁剪模式
+    python tools/probe_align.py 24 --mode=edge        # 换一种裁剪方案做对照
+
+⚠ **默认值必须是 ``core.DEFAULT_CROP``**。旧版本把这个变量硬编码成 ``mass``，
+于是探针跑出来的是「间距 -0.56、多页投票 0/3 全部失效」——那是一条**已经被否决的
+实验路线**的结果，与出厂配置毫无关系。README「4.3 裁剪越准反而越差」那张对照表
+里的失败行，只有在显式 ``--mode=mass`` 时才应该被复现出来。
 """
 import sys
 import time
+from pathlib import Path
 
-import cv2
 import numpy as np
 
-sys.path.insert(0, r"E:\pj\manhuachachong")
-sys.path.insert(0, r"E:\pj\manhuachachong\tools")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from comicdedup import core  # noqa: E402
 from make_testdata import make_manga_page, to_dl, to_jpeg, to_scan  # noqa: E402
 
@@ -22,10 +28,13 @@ def feat(im, mode, do_deskew=True):
 
 def main():
     n = int(sys.argv[1]) if len(sys.argv) > 1 else 24
-    mode = "mass"
+    mode = core.DEFAULT_CROP           # 出厂默认（bed）
     for a in sys.argv:
         if a.startswith("--mode="):
             mode = a.split("=")[1]
+            if mode not in ("bed", "mass", "edge", "paper"):
+                print(f"[FAIL] 未知裁剪模式 {mode!r}，可选 bed / mass / edge / paper")
+                return 2
 
     pages = [make_manga_page(1000 + i) for i in range(n)]
     dls = [to_dl(p, 400 + i, [0, 24, 60, 0, 18, 40][i % 6]) for i, p in enumerate(pages)]

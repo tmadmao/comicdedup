@@ -206,7 +206,7 @@ def main() -> int:
     # ---- 6. 导出 CSV（直接调函数，避开文件对话框）
     from comicdedup.engine import export_csv
     csvp = tmp / "dup.csv"
-    n = export_csv(w.groups, csvp, root=lib)
+    n = export_csv(w.groups, csvp)
     chk(csvp.exists() and n == 6, f"导出 CSV 成功（{n} 行）")
     head = csvp.read_text(encoding="utf-8-sig").splitlines()[0]
     chk("相似度" in head and "完整路径" in head and "建议保留" in head,

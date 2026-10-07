@@ -24,10 +24,10 @@ import threading
 import time
 import zlib
 from pathlib import Path
-from typing import Iterable, Optional, Sequence
+from typing import Optional, Sequence
 
-from . import __version__, data_dir, norm_path
-from .core import FEAT_VER, TILE, TILE_SMALL
+from . import data_dir, norm_path
+from .core import FEAT_VER
 
 log = logging.getLogger("comicdedup")
 
